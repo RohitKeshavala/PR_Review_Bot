@@ -31,16 +31,81 @@ interface RawAIReviewResponse {
 }
 
 /**
- * Strips markdown code block wrappers (```json ... ```) from model output
+ * Safely parses and repairs AI JSON responses, handling markdown wrappers,
+ * rogue leading/trailing text, and unescaped double quotes inside code snippets.
  */
-function cleanJsonOutput(raw: string): string {
+export function safeParseAIResponse(raw: string): RawAIReviewResponse {
+  if (!raw || raw.trim().length === 0) {
+    throw new Error('Received empty response from AI model');
+  }
+
+  // 1. Strip markdown fences if present
   let cleaned = raw.trim();
   if (cleaned.startsWith('```json')) {
     cleaned = cleaned.replace(/^```json\s*/i, '').replace(/\s*```$/, '');
   } else if (cleaned.startsWith('```')) {
     cleaned = cleaned.replace(/^```\s*/, '').replace(/\s*```$/, '');
   }
-  return cleaned.trim();
+
+  // 2. Extract JSON block from first { to last }
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+  }
+
+  // 3. Attempt direct JSON parse
+  try {
+    const parsed = JSON.parse(cleaned) as RawAIReviewResponse;
+    if (parsed && typeof parsed === 'object') {
+      return parsed;
+    }
+  } catch {
+    // Fall through to repair logic
+  }
+
+  // 4. Line-by-line repair of unescaped quotes in property values
+  try {
+    const lines = cleaned.split('\n');
+    const repairedLines = lines.map((line) => {
+      // Matches standard JSON string property line: "key": "content..." (with optional trailing comma)
+      const match = line.match(/^(\s*"[a-zA-Z0-9_]+"\s*:\s*")(.*)("(?:\s*,|\s*)?)$/);
+      if (match) {
+        const [, prefix, content, suffix] = match;
+        // Escape quotes that are not already escaped
+        const escapedContent = content.replace(/(?<!\\)"/g, '\\"');
+        return `${prefix}${escapedContent}${suffix}`;
+      }
+      return line;
+    });
+
+    const repaired = repairedLines.join('\n');
+    const parsed = JSON.parse(repaired) as RawAIReviewResponse;
+    if (parsed && typeof parsed === 'object') {
+      return parsed;
+    }
+  } catch {
+    // Fall through to multiline repair
+  }
+
+  // 5. Multiline regex repair for fields spanning lines
+  try {
+    const multilineRepaired = cleaned.replace(
+      /"(recommendationDiff|problem|whyItMatters|title|summary)"\s*:\s*"([\s\S]*?)"(?=\s*(?:,|\n\s*\}|\n\s*\]))/g,
+      (_match, key, val) => {
+        const escapedVal = val.replace(/(?<!\\)"/g, '\\"');
+        return `"${key}": "${escapedVal}"`;
+      },
+    );
+    const parsed = JSON.parse(multilineRepaired) as RawAIReviewResponse;
+    if (parsed && typeof parsed === 'object') {
+      return parsed;
+    }
+  } catch {
+    // Final throw with diagnostic details
+  }
+
+  throw new Error(`Failed to parse or repair AI response as JSON.`);
 }
 
 /**
@@ -50,14 +115,15 @@ async function executeGeminiWithFallback(
   config: AppConfig,
   systemPrompt: string,
   userPrompt: string,
-): Promise<string> {
+): Promise<{ rawText: string; parsed: RawAIReviewResponse }> {
   const prompt = `${systemPrompt}\n\n${userPrompt}`;
 
   // Candidate models aligned with debugging-agent architecture
   const candidateModels = [
-    'gemini-3.5-flash',
     config.geminiModel,
     config.geminiFallbackModel,
+    'gemini-3.5-flash',
+    'gemini-2.5-flash',
     'gemini-flash-lite-latest',
     'gemini-flash-latest',
     'gemini-2.0-flash',
@@ -67,7 +133,6 @@ async function executeGeminiWithFallback(
 
   const uniqueModels = [...new Set(candidateModels)];
 
-  let text = '';
   let lastError: unknown = null;
 
   const ai = new GoogleGenAI({ apiKey: config.geminiApiKey! });
@@ -84,10 +149,18 @@ async function executeGeminiWithFallback(
           temperature: 0.1,
         },
       });
-      text = response.text || '';
+
+      const text = response.text || '';
       if (text) {
-        console.log(`[AI Reviewer] Successfully received AI review from model '${model}'!`);
-        break;
+        try {
+          const parsed = safeParseAIResponse(text);
+          console.log(`[AI Reviewer] Successfully received and validated AI review JSON from model '${model}'!`);
+          return { rawText: text, parsed };
+        } catch (parseErr: unknown) {
+          const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+          console.warn(`[AI Reviewer Warning] Model '${model}' produced malformed JSON (${msg}). Trying next model in fallback chain...`);
+          lastError = parseErr;
+        }
       }
     } catch (err: unknown) {
       lastError = err;
@@ -97,42 +170,43 @@ async function executeGeminiWithFallback(
   }
 
   // Secondary fallback: @google/generative-ai SDK if @google/genai exhausted
-  if (!text) {
-    for (const fallbackModel of ['gemini-flash-latest', 'gemini-1.5-flash']) {
-      try {
-        console.log(`[AI Reviewer] Fallback attempting @google/generative-ai SDK with '${fallbackModel}'...`);
-        const genAI = new GoogleGenerativeAI(config.geminiApiKey!);
-        const model = genAI.getGenerativeModel({
-          model: fallbackModel,
-          systemInstruction: systemPrompt,
-          generationConfig: {
-            responseMimeType: 'application/json',
-            temperature: 0.1,
-          },
-        });
-        const result = await model.generateContent(prompt);
-        text = result.response.text();
-        if (text) {
-          console.log(`[AI Reviewer] Successfully received AI review from fallback model '${fallbackModel}'!`);
-          break;
+  for (const fallbackModel of ['gemini-flash-latest', 'gemini-1.5-flash', 'gemini-2.0-flash']) {
+    try {
+      console.log(`[AI Reviewer] Fallback attempting @google/generative-ai SDK with '${fallbackModel}'...`);
+      const genAI = new GoogleGenerativeAI(config.geminiApiKey!);
+      const model = genAI.getGenerativeModel({
+        model: fallbackModel,
+        systemInstruction: systemPrompt,
+        generationConfig: {
+          responseMimeType: 'application/json',
+          temperature: 0.1,
+        },
+      });
+      const result = await model.generateContent(prompt);
+      const text = result.response.text();
+      if (text) {
+        try {
+          const parsed = safeParseAIResponse(text);
+          console.log(`[AI Reviewer] Successfully received and validated AI review JSON from fallback model '${fallbackModel}'!`);
+          return { rawText: text, parsed };
+        } catch (parseErr: unknown) {
+          const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+          console.warn(`[AI Reviewer Warning] Fallback model '${fallbackModel}' produced malformed JSON (${msg}). Trying next fallback...`);
+          lastError = parseErr;
         }
-      } catch (fbErr: unknown) {
-        lastError = fbErr;
-        const msg = fbErr instanceof Error ? fbErr.message : String(fbErr);
-        console.warn(`[AI Reviewer Warning] Fallback model '${fallbackModel}' failed (${msg}). Trying next fallback...`);
       }
+    } catch (fbErr: unknown) {
+      lastError = fbErr;
+      const msg = fbErr instanceof Error ? fbErr.message : String(fbErr);
+      console.warn(`[AI Reviewer Warning] Fallback model '${fallbackModel}' failed (${msg}). Trying next fallback...`);
     }
   }
 
-  if (!text && lastError) {
+  if (lastError) {
     throw lastError;
   }
 
-  if (!text) {
-    throw new Error('No response received from any candidate Gemini model or SDK fallback.');
-  }
-
-  return text;
+  throw new Error('No valid response received from any candidate Gemini model or SDK fallback.');
 }
 
 /**
@@ -159,6 +233,10 @@ Rules for Review:
    - Explain why it matters (impact on reliability, security, scalability).
    - Provide a concise recommendationDiff or suggested replacement code block.
 5. If the PR diff is completely clean, return an empty findings list [].
+6. CRITICAL JSON ENCODING REQUIREMENT:
+   - Output must be strictly valid JSON.
+   - Any double quotes inside JSON string values (especially HTML attributes in recommendationDiff like class="...", or string literals in code snippets) MUST be properly escaped as \\" or use single quotes '.
+   - Never output raw unescaped double quotes inside a JSON string value.
 
 Output strictly valid JSON with this exact schema:
 {
@@ -374,18 +452,12 @@ export async function performAIReview(
     }
 
     const { systemPrompt, userPrompt } = buildPrompts(context);
-    const rawJson = await executeGeminiWithFallback(
+    const { parsed } = await executeGeminiWithFallback(
       config,
       systemPrompt,
       userPrompt,
     );
-
-    try {
-      const cleaned = cleanJsonOutput(rawJson);
-      aiResponse = JSON.parse(cleaned) as RawAIReviewResponse;
-    } catch (parseErr) {
-      throw new Error(`Failed to parse Gemini response as JSON: ${parseErr}\nRaw Output: ${rawJson}`);
-    }
+    aiResponse = parsed;
   }
 
   // Validate diff hunk boundaries for each finding
