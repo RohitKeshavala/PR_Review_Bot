@@ -221,12 +221,10 @@ Embedded 12-Step Universal Review Principles:
 ${context.principles}
 
 Rules for Review:
-1. STRICT DIFF-ONLY SCOPE: Review ONLY lines that were added or modified in the unified diff (+ lines). DO NOT review unchanged pre-existing legacy code or untouched files.
-2. NO SPECULATIVE / THEORETICAL ISSUES: Do NOT raise "what-if" issues, theoretical design preferences, or hypothetical future misuse scenarios (e.g., "if someone in the future uses this field for dynamic data"). Only report concrete, demonstrable bugs, fatal exceptions, or security vulnerabilities that exist in this exact code right now.
-3. HIGH CONFIDENCE THRESHOLD: Only report an issue if you have >= 90% confidence that it is an actual defect or regression introduced by this PR. When in doubt, prefer silence over false alarms.
-4. FOCUS ON BLOCKERS: Reserve CRITICAL and HIGH strictly for catastrophic defects (fatal runtime exceptions, authentication bypass, active injection, data loss, hardcoded secrets). Minor style suggestions, naming improvements, or non-fatal refactors must be LOW or INFORMATIONAL.
-5. MAXIMUM 3-4 FINDINGS: Return at most the top 3-4 highest-impact findings. If the PR is clean or defects are trivial, return an empty findings list [].
-6. For every finding:
+1. NO SPECULATIVE / THEORETICAL ISSUES: Do NOT raise "what-if" issues, theoretical design preferences, or hypothetical future misuse scenarios (e.g., "if someone in the future uses this field for dynamic data"). Only report concrete, demonstrable bugs, fatal exceptions, or security vulnerabilities that exist in this exact code right now.
+2. HIGH CONFIDENCE THRESHOLD: Only report an issue if you have >= 90% confidence that it is an actual defect or regression introduced by this PR. When in doubt, prefer silence over false alarms.
+3. FOCUS ON BLOCKERS: Reserve CRITICAL and HIGH strictly for catastrophic defects (fatal runtime exceptions, authentication bypass, active injection, data loss, hardcoded secrets). Minor style suggestions, naming improvements, or non-fatal refactors must be LOW or INFORMATIONAL.
+4. For every finding:
    - Identify the exact filePath (must match a file in the diff).
    - Identify the lineNumber in the NEW file where the defect or improvement occurs.
    - Assign severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFORMATIONAL'.
@@ -234,7 +232,8 @@ Rules for Review:
    - Detail the problem clearly.
    - Explain why it matters (impact on reliability, security, scalability).
    - Provide a concise recommendationDiff or suggested replacement code block.
-7. CRITICAL JSON ENCODING REQUIREMENT:
+5. If the PR diff is completely clean, return an empty findings list [].
+6. CRITICAL JSON ENCODING REQUIREMENT:
    - Output must be strictly valid JSON.
    - Any double quotes inside JSON string values (especially HTML attributes in recommendationDiff like class="...", or string literals in code snippets) MUST be properly escaped as \\" or use single quotes '.
    - Never output raw unescaped double quotes inside a JSON string value.
@@ -491,15 +490,13 @@ export async function performAIReview(
     INFORMATIONAL: 4,
   };
 
-  // Prioritize findings in diff hunks first, then by severity, capped at top 4 issues
-  const prioritizedFindings = validatedFindings
-    .sort((a, b) => {
-      if (a.inDiffHunk !== b.inDiffHunk) {
-        return a.inDiffHunk ? -1 : 1;
-      }
-      return severityRank[a.severity] - severityRank[b.severity];
-    })
-    .slice(0, 4);
+  // Prioritize findings in diff hunks first, then by severity
+  const prioritizedFindings = validatedFindings.sort((a, b) => {
+    if (a.inDiffHunk !== b.inDiffHunk) {
+      return a.inDiffHunk ? -1 : 1;
+    }
+    return severityRank[a.severity] - severityRank[b.severity];
+  });
 
   const { healthScore, grade, verdict, stats } = calculateScoreAndVerdict(
     prioritizedFindings,
