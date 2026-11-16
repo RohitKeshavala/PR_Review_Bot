@@ -70,27 +70,6 @@ export function toConsole(report: PRReviewReport): string {
   out += `  ${colors.bold}Summary:${colors.reset}\n`;
   out += `  ${report.summary.replace(/\n/g, '\n  ')}\n\n`;
 
-  // Tooling Checks
-  if (report.toolingChecks.length > 0) {
-    out += hr + '\n';
-    out += `  ${colors.bold}Automated Tooling Checks:${colors.reset}\n`;
-    for (const check of report.toolingChecks) {
-      let statusStr = '';
-      if (check.status === 'PASSED') {
-        statusStr = `${colors.green}✔ PASSED${colors.reset}`;
-      } else if (check.status === 'FAILED') {
-        statusStr = `${colors.red}✖ FAILED${colors.reset}`;
-      } else {
-        statusStr = `${colors.dim}⊘ SKIPPED${colors.reset}`;
-      }
-      out += `  - ${check.name.padEnd(20)} ${statusStr.padEnd(18)} (${check.durationMs}ms)\n`;
-      if (check.status === 'FAILED' && check.error) {
-        out += `    ${colors.red}${check.error.split('\n')[0]}${colors.reset}\n`;
-      }
-    }
-    out += '\n';
-  }
-
   // Findings
   if (report.findings.length > 0) {
     out += hr + '\n';
@@ -175,28 +154,6 @@ export function toGitHubMarkdown(report: PRReviewReport): string {
   // Executive Summary
   md += `### 📝 Executive Summary\n\n`;
   md += `${report.summary}\n\n`;
-
-  // Tooling Checks Table
-  if (report.toolingChecks.length > 0) {
-    md += `### ⚙️ Automated Workspace Checks\n\n`;
-    md += `| Check | Command | Status | Duration |\n`;
-    md += `| :--- | :--- | :---: | :---: |\n`;
-    for (const c of report.toolingChecks) {
-      const statusIcon =
-        c.status === 'PASSED' ? '✅ Passed' : c.status === 'FAILED' ? '❌ Failed' : '⚪ Skipped';
-      md += `| ${c.name} | \`${c.command}\` | ${statusIcon} | ${c.durationMs}ms |\n`;
-    }
-    md += `\n`;
-
-    const failed = report.toolingChecks.filter((c) => c.status === 'FAILED');
-    if (failed.length > 0) {
-      md += `<details><summary>❌ <b>Check Failure Details</b></summary>\n\n`;
-      for (const f of failed) {
-        md += `**${f.name}** (\`${f.command}\`):\n\`\`\`\n${f.error || f.output}\n\`\`\`\n`;
-      }
-      md += `</details>\n\n`;
-    }
-  }
 
   // Findings Table & Details
   if (report.findings.length > 0) {

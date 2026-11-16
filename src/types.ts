@@ -56,17 +56,6 @@ export interface PRFinding {
   recommendationDiff?: string;
 }
 
-export type CheckStatus = 'PASSED' | 'FAILED' | 'SKIPPED';
-
-export interface CheckResult {
-  name: string;
-  command: string;
-  status: CheckStatus;
-  durationMs: number;
-  output?: string;
-  error?: string;
-}
-
 export interface PRReviewStats {
   filesChanged: number;
   additions: number;
@@ -84,7 +73,6 @@ export interface PRReviewReport {
   verdict: ReviewVerdict;
   summary: string;
   stats: PRReviewStats;
-  toolingChecks: CheckResult[];
   findings: PRFinding[];
   targetPath?: string;
   baseBranch?: string;

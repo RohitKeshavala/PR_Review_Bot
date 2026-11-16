@@ -33,7 +33,6 @@ PR_Review_Bot/
 │   ├── types.ts                      # Core interfaces, severity, categories & data contracts
 │   ├── config.ts                     # Environment & CLI options configuration loader
 │   ├── git-service.ts                # Diff extraction, parsing & hunk boundary validation
-│   ├── checks-runner.ts              # Polyglot test/build/lint dynamic runner
 │   ├── context-builder.ts            # Embedded 12-step review rules & caller context
 │   ├── reviewer.ts                   # Gemini AI reasoner, scoring & verdict engine
 │   ├── formatter.ts                  # ANSI terminal, Markdown & inline suggestion formatter

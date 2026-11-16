@@ -3,7 +3,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Command } from 'commander';
-import { runPolyglotChecks } from './checks-runner.js';
 import { loadConfig, validateConfig } from './config.js';
 import { buildReviewContext } from './context-builder.js';
 import { toConsole, toGitHubMarkdown } from './formatter.js';
@@ -75,29 +74,25 @@ program
       const fileDiffs: FileDiff[] = parseDiff(rawDiff);
       console.log(`📁 Analyzed diff: ${fileDiffs.length} file(s) changed.`);
 
-      // 3. Run polyglot checks in target workspace
-      console.log('⚙️ Executing polyglot workspace checks (build/lint/test)...');
-      const checkResults = await runPolyglotChecks(config.targetProjectPath);
-
-      // 4. Build context
+      // 3. Build context
       console.log('🧠 Building multi-file review context & applying 12-step principles...');
-      const context = buildReviewContext(config.targetProjectPath, fileDiffs, checkResults);
+      const context = buildReviewContext(config.targetProjectPath, fileDiffs);
 
-      // 5. Perform AI Review Reasoning
+      // 4. Perform AI Review Reasoning
       console.log('✨ Performing AI review analysis with Google Gemini...');
       const report = await performAIReview(context, config);
 
-      // 6. Format and display console output
+      // 5. Format and display console output
       const consoleOutput = toConsole(report);
       console.log(consoleOutput);
 
-      // 7. Write Markdown Report
+      // 6. Write Markdown Report
       const markdownOutput = toGitHubMarkdown(report);
       const outputPath = path.resolve(process.cwd(), config.outputReportPath);
       fs.writeFileSync(outputPath, markdownOutput, 'utf-8');
       console.log(`📄 Markdown report saved to: ${outputPath}`);
 
-      // 8. Post to GitHub if requested or simulate if dry-run
+      // 7. Post to GitHub if requested or simulate if dry-run
       if (config.postToGitHub || config.dryRun) {
         if (config.githubRepository && config.prNumber) {
           const { owner, repo } = parseRepoString(config.githubRepository);
@@ -127,7 +122,7 @@ program
         }
       }
 
-      // 9. CI Gate evaluation
+      // 8. CI Gate evaluation
       if (config.failOnChanges && report.verdict === 'CHANGES_REQUESTED') {
         console.error('❌ CI Gate Failed: Review verdict is CHANGES_REQUESTED.');
         process.exit(1);

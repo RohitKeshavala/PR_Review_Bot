@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { CheckResult, FileDiff } from './types.js';
+import type { FileDiff } from './types.js';
 
 export const UNIVERSAL_REVIEW_PRINCIPLES = `
 === 12-STEP UNIVERSAL CODE REVIEW PRINCIPLES ===
@@ -73,7 +73,6 @@ export interface ReviewContext {
   detectedLanguages: string[];
   fileDiffs: FileDiff[];
   fileContents: Record<string, string>;
-  checkResults: CheckResult[];
   principles: string;
   summaryOfChanges: {
     filesCount: number;
@@ -174,7 +173,6 @@ function loadTargetFileContents(
 export function buildReviewContext(
   targetPath: string,
   fileDiffs: FileDiff[],
-  checkResults: CheckResult[],
 ): ReviewContext {
   const languages = detectLanguages(fileDiffs);
   const fileContents = loadTargetFileContents(targetPath, fileDiffs);
@@ -191,7 +189,6 @@ export function buildReviewContext(
     detectedLanguages: languages,
     fileDiffs,
     fileContents,
-    checkResults,
     principles: UNIVERSAL_REVIEW_PRINCIPLES,
     summaryOfChanges: {
       filesCount: fileDiffs.length,

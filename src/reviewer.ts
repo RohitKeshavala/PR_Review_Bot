@@ -4,7 +4,6 @@ import type { ReviewContext } from './context-builder.js';
 import { isLineInDiffHunk } from './git-service.js';
 import type {
   AppConfig,
-  CheckResult,
   FindingCategory,
   PRFinding,
   PRReviewReport,
@@ -255,14 +254,6 @@ Output strictly valid JSON with this exact schema:
   ]
 }`;
 
-  // Assemble user prompt with empirical check results, diff, and full file contents
-  const checkResultsSummary = context.checkResults
-    .map(
-      (c) =>
-        `- [${c.status}] ${c.name} (${c.command}): ${c.error ? 'ERROR: ' + c.error : c.output || 'Passed'}`,
-    )
-    .join('\n');
-
   let fileContentsSection = '';
   for (const [filePath, content] of Object.entries(context.fileContents)) {
     fileContentsSection += `\n--- Full File Context: ${filePath} ---\n${content}\n`;
@@ -284,9 +275,6 @@ Output strictly valid JSON with this exact schema:
 
   const userPrompt = `Please review this Pull Request:
 
-EMPIRICAL TOOLING CHECK RESULTS:
-${checkResultsSummary || 'No automated checks executed.'}
-
 PULL REQUEST UNIFIED DIFF:
 ${rawDiff || 'No changes detected in diff.'}
 
@@ -302,22 +290,6 @@ ${fileContentsSection || 'No modified file contents available.'}
  */
 function generateDryRunReview(context: ReviewContext): RawAIReviewResponse {
   const findings: RawAIFinding[] = [];
-
-  // Check if any check failed
-  const failedChecks = context.checkResults.filter((c) => c.status === 'FAILED');
-
-  if (failedChecks.length > 0) {
-    findings.push({
-      filePath: context.fileDiffs[0]?.newPath || 'package.json',
-      lineNumber: 1,
-      title: `Automated Tooling Check Failed: ${failedChecks[0].name}`,
-      severity: 'HIGH',
-      category: 'Testing',
-      problem: `Execution of "${failedChecks[0].command}" failed: ${failedChecks[0].error || 'Non-zero exit code'}`,
-      whyItMatters: 'Failing automated checks block continuous integration and indicate broken builds or tests.',
-      recommendationDiff: '// Ensure all build, lint, and test scripts pass locally before submitting PR.',
-    });
-  }
 
   if (context.fileDiffs.length > 0) {
     const firstDiff = context.fileDiffs[0];
@@ -337,7 +309,7 @@ function generateDryRunReview(context: ReviewContext): RawAIReviewResponse {
   }
 
   return {
-    summary: `[DRY-RUN SIMULATION] Analyzed ${context.fileDiffs.length} modified file(s) across ${context.detectedLanguages.join(', ')}. Automated checks completed: ${context.checkResults.filter((c) => c.status === 'PASSED').length} passed, ${failedChecks.length} failed, ${context.checkResults.filter((c) => c.status === 'SKIPPED').length} skipped.`,
+    summary: `[DRY-RUN SIMULATION] Analyzed ${context.fileDiffs.length} modified file(s) across ${context.detectedLanguages.join(', ')}. Code structure validated against universal review principles.`,
     findings,
   };
 }
@@ -345,10 +317,7 @@ function generateDryRunReview(context: ReviewContext): RawAIReviewResponse {
 /**
  * Calculates review health score (0-100), letter grade (A+ to F), and review verdict
  */
-export function calculateScoreAndVerdict(
-  findings: PRFinding[],
-  checkResults: CheckResult[],
-): {
+export function calculateScoreAndVerdict(findings: PRFinding[]): {
   healthScore: number;
   grade: ReviewGrade;
   verdict: ReviewVerdict;
@@ -386,16 +355,13 @@ export function calculateScoreAndVerdict(
     }
   }
 
-  const failedChecksCount = checkResults.filter((c) => c.status === 'FAILED').length;
-
-  // Blueprint rubric formula:
-  // Score = 100 - (Critical * 30 + High * 15 + Medium * 7 + Low * 3 + FailedChecks * 25)
+  // Pure Code Quality Scoring Rubric:
+  // Score = 100 - (Critical * 30 + High * 15 + Medium * 7 + Low * 3)
   const penalty =
     criticalIssues * 30 +
     highIssues * 15 +
     mediumIssues * 7 +
-    lowIssues * 3 +
-    failedChecksCount * 25;
+    lowIssues * 3;
 
   const rawScore = 100 - penalty;
   const healthScore = Math.max(0, Math.min(100, rawScore));
@@ -410,11 +376,11 @@ export function calculateScoreAndVerdict(
   else grade = 'F';
 
   // Determine Verdict
-  // CHANGES_REQUESTED: If >= 1 Critical, >= 1 High, or failed tests.
+  // CHANGES_REQUESTED: If >= 1 Critical or >= 1 High issue.
   // APPROVE_WITH_COMMENTS: If only Medium/Low issues remain.
   // APPROVE: Clean diff with 0 issues (or only informational).
   let verdict: ReviewVerdict = 'APPROVE';
-  if (criticalIssues > 0 || highIssues > 0 || failedChecksCount > 0) {
+  if (criticalIssues > 0 || highIssues > 0) {
     verdict = 'CHANGES_REQUESTED';
   } else if (mediumIssues > 0 || lowIssues > 0) {
     verdict = 'APPROVE_WITH_COMMENTS';
@@ -500,7 +466,6 @@ export async function performAIReview(
 
   const { healthScore, grade, verdict, stats } = calculateScoreAndVerdict(
     prioritizedFindings,
-    context.checkResults,
   );
 
   const fullStats: PRReviewStats = {
@@ -516,7 +481,6 @@ export async function performAIReview(
     verdict,
     summary: aiResponse.summary || 'Code review completed successfully.',
     stats: fullStats,
-    toolingChecks: context.checkResults,
     findings: prioritizedFindings,
     targetPath: config.targetProjectPath,
     baseBranch: config.baseBranch,
