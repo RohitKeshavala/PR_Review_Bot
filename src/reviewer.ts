@@ -55,11 +55,11 @@ async function executeGeminiWithFallback(
 
   // Candidate models aligned with debugging-agent architecture
   const candidateModels = [
+    'gemini-3.5-flash',
     config.geminiModel,
     config.geminiFallbackModel,
     'gemini-flash-lite-latest',
     'gemini-flash-latest',
-    'gemini-3.5-flash',
     'gemini-2.0-flash',
     'gemini-1.5-flash-latest',
     'gemini-1.5-flash',
