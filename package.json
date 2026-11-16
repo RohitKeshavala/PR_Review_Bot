@@ -8,7 +8,8 @@
     "pr-review-bot": "./dist/src/cli.js"
   },
   "scripts": {
-    "build": "tsc",
+    "clean": "node -e \"import('node:fs').then(fs => fs.rmSync('dist', { recursive: true, force: true }))\"",
+    "build": "npm run clean && tsc",
     "start": "node dist/src/cli.js",
     "dev": "tsx src/cli.ts",
     "lint": "eslint src/"
