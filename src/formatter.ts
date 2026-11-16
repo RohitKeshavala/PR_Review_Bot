@@ -153,7 +153,7 @@ export function toInlineComment(finding: PRFinding): string {
 export function toGitHubMarkdown(report: PRReviewReport): string {
   const verdictBadge =
     report.verdict === 'APPROVE'
-      ? '🟢 **APPROVE**'
+      ? '🟢 **ALL LOOKS GOOD**'
       : report.verdict === 'APPROVE_WITH_COMMENTS'
         ? '🟡 **APPROVE WITH COMMENTS**'
         : '🔴 **CHANGES REQUESTED**';
@@ -224,7 +224,7 @@ export function toGitHubMarkdown(report: PRReviewReport): string {
     });
   } else {
     md += `### 🌟 Review Findings\n\n`;
-    md += `> No defects or architectural violations identified. Great job!\n\n`;
+    md += `> ✅ **All looks good!** No defects, security vulnerabilities, or architectural violations identified. Clean PR diff ready for merge.\n\n`;
   }
 
   // Footer
