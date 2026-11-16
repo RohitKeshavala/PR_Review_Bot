@@ -1,0 +1,30 @@
+{
+  "name": "universal-pr-review-bot",
+  "version": "1.0.0",
+  "description": "Autonomous polyglot AI PR Review Bot powered by Google Gemini and GitHub Actions",
+  "type": "module",
+  "main": "dist/src/cli.js",
+  "bin": {
+    "pr-review-bot": "./dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/src/cli.js",
+    "dev": "tsx src/cli.ts",
+    "lint": "eslint src/"
+  },
+  "dependencies": {
+    "@google/genai": "^2.28.0",
+    "@google/generative-ai": "^0.24.1",
+    "@octokit/rest": "^21.0.2",
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "eslint": "^10.15.0",
+    "tsx": "^4.7.1",
+    "typescript": "^5.3.3",
+    "typescript-eslint": "^8.72.2"
+  }
+}

@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env
+PR_REVIEW_REPORT.md
+PR_REVIEW_GITHUB_PAYLOAD.json
+*.log
+
