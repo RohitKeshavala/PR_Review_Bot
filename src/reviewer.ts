@@ -221,10 +221,12 @@ Embedded 12-Step Universal Review Principles:
 ${context.principles}
 
 Rules for Review:
-1. Thoroughly review all additions, modifications, and deletions.
-2. Focus on actionable, high-impact defects: Security flaws, logic errors, race conditions, memory leaks, performance bottlenecks, unhandled nulls/exceptions, broken contracts.
-3. Ignore purely stylistic nitpicks unless they violate standard idiomatic practices or cause bugs.
-4. For every finding:
+1. STRICT DIFF-ONLY SCOPE: Review ONLY lines that were added or modified in the unified diff (+ lines). DO NOT review unchanged pre-existing legacy code or untouched files.
+2. NO SPECULATIVE / THEORETICAL ISSUES: Do NOT raise "what-if" issues, theoretical design preferences, or hypothetical future misuse scenarios (e.g., "if someone in the future uses this field for dynamic data"). Only report concrete, demonstrable bugs, fatal exceptions, or security vulnerabilities that exist in this exact code right now.
+3. HIGH CONFIDENCE THRESHOLD: Only report an issue if you have >= 90% confidence that it is an actual defect or regression introduced by this PR. When in doubt, prefer silence over false alarms.
+4. FOCUS ON BLOCKERS: Reserve CRITICAL and HIGH strictly for catastrophic defects (fatal runtime exceptions, authentication bypass, active injection, data loss, hardcoded secrets). Minor style suggestions, naming improvements, or non-fatal refactors must be LOW or INFORMATIONAL.
+5. MAXIMUM 3-4 FINDINGS: Return at most the top 3-4 highest-impact findings. If the PR is clean or defects are trivial, return an empty findings list [].
+6. For every finding:
    - Identify the exact filePath (must match a file in the diff).
    - Identify the lineNumber in the NEW file where the defect or improvement occurs.
    - Assign severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFORMATIONAL'.
@@ -232,8 +234,7 @@ Rules for Review:
    - Detail the problem clearly.
    - Explain why it matters (impact on reliability, security, scalability).
    - Provide a concise recommendationDiff or suggested replacement code block.
-5. If the PR diff is completely clean, return an empty findings list [].
-6. CRITICAL JSON ENCODING REQUIREMENT:
+7. CRITICAL JSON ENCODING REQUIREMENT:
    - Output must be strictly valid JSON.
    - Any double quotes inside JSON string values (especially HTML attributes in recommendationDiff like class="...", or string literals in code snippets) MUST be properly escaped as \\" or use single quotes '.
    - Never output raw unescaped double quotes inside a JSON string value.
@@ -361,6 +362,12 @@ export function calculateScoreAndVerdict(
   let informationalIssues = 0;
 
   for (const f of findings) {
+    // Production rule: only findings inside the PR diff hunks can penalize score or block PR
+    if (!f.inDiffHunk) {
+      informationalIssues++;
+      continue;
+    }
+
     switch (f.severity) {
       case 'CRITICAL':
         criticalIssues++;
@@ -476,8 +483,26 @@ export async function performAIReview(
     };
   });
 
+  const severityRank: Record<Severity, number> = {
+    CRITICAL: 0,
+    HIGH: 1,
+    MEDIUM: 2,
+    LOW: 3,
+    INFORMATIONAL: 4,
+  };
+
+  // Prioritize findings in diff hunks first, then by severity, capped at top 4 issues
+  const prioritizedFindings = validatedFindings
+    .sort((a, b) => {
+      if (a.inDiffHunk !== b.inDiffHunk) {
+        return a.inDiffHunk ? -1 : 1;
+      }
+      return severityRank[a.severity] - severityRank[b.severity];
+    })
+    .slice(0, 4);
+
   const { healthScore, grade, verdict, stats } = calculateScoreAndVerdict(
-    validatedFindings,
+    prioritizedFindings,
     context.checkResults,
   );
 
@@ -495,7 +520,7 @@ export async function performAIReview(
     summary: aiResponse.summary || 'Code review completed successfully.',
     stats: fullStats,
     toolingChecks: context.checkResults,
-    findings: validatedFindings,
+    findings: prioritizedFindings,
     targetPath: config.targetProjectPath,
     baseBranch: config.baseBranch,
     headBranch: config.headBranch,

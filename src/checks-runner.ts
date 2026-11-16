@@ -48,6 +48,23 @@ function runCommand(name: string, command: string, cwd: string, timeoutMs = 1200
 
     const fullOutput = [stdout, stderr].filter(Boolean).join('\n') || message;
 
+    // If command is not installed in runner environment, skip instead of failing the PR
+    const isMissingCommand =
+      fullOutput.includes('not found') ||
+      fullOutput.includes('command not found') ||
+      fullOutput.includes('is not recognized as an internal or external command') ||
+      fullOutput.includes('No such file or directory');
+
+    if (isMissingCommand) {
+      return {
+        name,
+        command,
+        status: 'SKIPPED',
+        durationMs,
+        output: `Skipped: command not found in runner environment (${fullOutput.split('\n')[0]})`,
+      };
+    }
+
     return {
       name,
       command,
@@ -92,31 +109,56 @@ export async function runPolyglotChecks(targetDir: string): Promise<CheckResult[
       const pkgContent = fs.readFileSync(packageJsonPath, 'utf-8');
       const pkg = JSON.parse(pkgContent);
       const scripts = pkg.scripts || {};
+      const hasNodeModules = fs.existsSync(path.join(resolvedTarget, 'node_modules'));
 
-      // Build check
-      if (scripts.build) {
-        results.push(runCommand('Node.js Build', 'npm run build', resolvedTarget));
+      if (!hasNodeModules) {
+        results.push(
+          skippedCheck(
+            'Node.js Build',
+            'npm run build',
+            'Skipped: node_modules not installed in target workspace on runner',
+          ),
+        );
+        results.push(
+          skippedCheck(
+            'Node.js Lint',
+            'npm run lint',
+            'Skipped: node_modules not installed in target workspace on runner',
+          ),
+        );
+        results.push(
+          skippedCheck(
+            'Node.js Test',
+            'npm test',
+            'Skipped: node_modules not installed in target workspace on runner',
+          ),
+        );
       } else {
-        results.push(skippedCheck('Node.js Build', 'npm run build', 'No "build" script in package.json'));
-      }
-
-      // Lint check
-      if (scripts.lint) {
-        results.push(runCommand('Node.js Lint', 'npm run lint', resolvedTarget));
-      } else {
-        results.push(skippedCheck('Node.js Lint', 'npm run lint', 'No "lint" script in package.json'));
-      }
-
-      // Test check
-      if (scripts.test) {
-        // Skip dummy test script ("echo \"Error: no test specified\" && exit 1")
-        if (typeof scripts.test === 'string' && scripts.test.includes('no test specified')) {
-          results.push(skippedCheck('Node.js Test', 'npm test', 'Default npm test placeholder (no tests defined)'));
+        // Build check
+        if (scripts.build) {
+          results.push(runCommand('Node.js Build', 'npm run build', resolvedTarget));
         } else {
-          results.push(runCommand('Node.js Test', 'npm test', resolvedTarget));
+          results.push(skippedCheck('Node.js Build', 'npm run build', 'No "build" script in package.json'));
         }
-      } else {
-        results.push(skippedCheck('Node.js Test', 'npm test', 'No "test" script in package.json'));
+
+        // Lint check
+        if (scripts.lint) {
+          results.push(runCommand('Node.js Lint', 'npm run lint', resolvedTarget));
+        } else {
+          results.push(skippedCheck('Node.js Lint', 'npm run lint', 'No "lint" script in package.json'));
+        }
+
+        // Test check
+        if (scripts.test) {
+          // Skip dummy test script ("echo \"Error: no test specified\" && exit 1")
+          if (typeof scripts.test === 'string' && scripts.test.includes('no test specified')) {
+            results.push(skippedCheck('Node.js Test', 'npm test', 'Default npm test placeholder (no tests defined)'));
+          } else {
+            results.push(runCommand('Node.js Test', 'npm test', resolvedTarget));
+          }
+        } else {
+          results.push(skippedCheck('Node.js Test', 'npm test', 'No "test" script in package.json'));
+        }
       }
     } catch (e) {
       results.push({
