@@ -5,13 +5,6 @@ import type { AppConfig } from './types.js';
 // Load environment variables from .env file if present
 dotenv.config();
 
-export const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
-export const GEMINI_MODEL_FALLBACKS = [
-  'gemini-2.5-flash',
-  'gemini-flash-latest',
-  'gemini-1.5-flash',
-];
-
 export interface CliOptions {
   target?: string;
   base?: string;
@@ -22,7 +15,6 @@ export interface CliOptions {
   dryRun?: boolean;
   failOnChanges?: boolean;
   output?: string;
-  model?: string;
 }
 
 /**
@@ -49,7 +41,8 @@ export function loadConfig(cliOptions: CliOptions = {}): AppConfig {
 
   const config: AppConfig = {
     geminiApiKey: env.GEMINI_API_KEY,
-    geminiModel: cliOptions.model || env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL,
+    geminiModel: env.GEMINI_MODEL,
+    geminiFallbackModel: env.GEMINI_FALLBACK_MODEL,
     githubToken: env.GITHUB_TOKEN || env.GH_TOKEN,
     githubRepository: cliOptions.repo || env.GITHUB_REPOSITORY,
     targetProjectPath,
@@ -92,4 +85,3 @@ export function validateConfig(config: AppConfig): { valid: boolean; errors: str
     errors,
   };
 }
-

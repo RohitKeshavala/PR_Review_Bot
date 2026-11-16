@@ -149,7 +149,6 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     with:
       target-path: '.'
-      gemini-model: 'gemini-2.5-flash'
       fail-on-changes: false
 ```
 
@@ -171,7 +170,6 @@ Options:
   --dry-run            Simulate review and save local payload JSON
   --fail-on-changes    Exit code 1 on CHANGES_REQUESTED (CI gate)
   -o, --output <path>  Markdown report path (default: "./PR_REVIEW_REPORT.md")
-  -m, --model <model>  Gemini model to use (default: "gemini-2.5-flash")
   -h, --help           Display help for command
 ```
 
@@ -179,3 +177,4 @@ Options:
 
 ## 📜 License
 MIT License. Built for autonomous continuous integration workflows.
+

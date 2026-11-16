@@ -32,7 +32,6 @@ program
   .option('--dry-run', 'Simulate review and save local payload JSON')
   .option('--fail-on-changes', 'Exit code 1 on CHANGES_REQUESTED (CI gate)')
   .option('-o, --output <path>', 'Markdown report path', './PR_REVIEW_REPORT.md')
-  .option('-m, --model <model>', 'Gemini model to use')
   .action(async (options) => {
     try {
       const config = loadConfig(options);
@@ -48,7 +47,7 @@ program
 
       console.log('🚀 Initializing Universal AI PR Review Bot...');
       console.log(`   Target Directory: ${config.targetProjectPath}`);
-      console.log(`   Gemini Model:     ${config.geminiModel}`);
+      console.log(`   AI Engine:        Google Gemini (Dynamic Fallback Chain)`);
       console.log(`   Mode:             ${config.dryRun ? 'DRY-RUN (Simulation)' : 'LIVE'}`);
 
       // 1. Acquire diff (Remote PR diff if available and requested, otherwise local git diff)

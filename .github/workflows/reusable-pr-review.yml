@@ -8,11 +8,6 @@ on:
         type: string
         required: false
         default: '.'
-      gemini-model:
-        description: 'Gemini model to use'
-        type: string
-        required: false
-        default: 'gemini-2.5-flash'
       fail-on-changes:
         description: 'Fail CI job if CHANGES_REQUESTED is issued'
         type: boolean
@@ -45,7 +40,7 @@ jobs:
       - name: Checkout Review Bot Engine
         uses: actions/checkout@v4
         with:
-          repository: your-org/universal-pr-bot # Replace with your central repo or organization
+          repository: RohitKeshavala/PR_Review_Bot # Replace with your central repo or organization
           path: .pr-bot-runner
           ref: main
 
@@ -70,11 +65,9 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          GEMINI_MODEL: ${{ inputs.gemini-model }}
         run: |
           node .pr-bot-runner/dist/src/cli.js \
             --target "${{ inputs.target-path }}" \
             --pr "${{ github.event.pull_request.number }}" \
             --post-to-github \
             ${{ inputs.fail-on-changes && '--fail-on-changes' || '' }}
-

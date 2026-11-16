@@ -1,6 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { GEMINI_MODEL_FALLBACKS } from './config.js';
 import type { ReviewContext } from './context-builder.js';
 import { isLineInDiffHunk } from './git-service.js';
 import type {
@@ -45,98 +44,94 @@ function cleanJsonOutput(raw: string): string {
 }
 
 /**
- * Executes Gemini call using the new @google/genai SDK
- */
-async function callGenAISDK(
-  apiKey: string,
-  modelName: string,
-  systemPrompt: string,
-  userPrompt: string,
-): Promise<string> {
-  const ai = new GoogleGenAI({ apiKey });
-  const response = await ai.models.generateContent({
-    model: modelName,
-    contents: userPrompt,
-    config: {
-      systemInstruction: systemPrompt,
-      responseMimeType: 'application/json',
-      temperature: 0.2,
-    },
-  });
-
-  const text = response.text;
-  if (!text) {
-    throw new Error(`Empty response from @google/genai model ${modelName}`);
-  }
-  return text;
-}
-
-/**
- * Executes Gemini call using the fallback @google/generative-ai SDK
- */
-async function callGenerativeAISDK(
-  apiKey: string,
-  modelName: string,
-  systemPrompt: string,
-  userPrompt: string,
-): Promise<string> {
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({
-    model: modelName,
-    systemInstruction: systemPrompt,
-    generationConfig: {
-      responseMimeType: 'application/json',
-      temperature: 0.2,
-    },
-  });
-
-  const result = await model.generateContent(userPrompt);
-  const text = result.response.text();
-  if (!text) {
-    throw new Error(`Empty response from @google/generative-ai model ${modelName}`);
-  }
-  return text;
-}
-
-/**
- * Executes query with dual-SDK and multi-model fallback chain
+ * Executes query with dual-SDK and multi-model fallback chain aligned with debugging-agent architecture
  */
 async function executeGeminiWithFallback(
-  apiKey: string,
-  requestedModel: string,
+  config: AppConfig,
   systemPrompt: string,
   userPrompt: string,
 ): Promise<string> {
-  // Build priority list of models to try
-  const modelsToTry = [
-    requestedModel,
-    ...GEMINI_MODEL_FALLBACKS.filter((m) => m !== requestedModel),
-  ];
+  const prompt = `${systemPrompt}\n\n${userPrompt}`;
 
+  // Candidate models aligned with debugging-agent architecture
+  const candidateModels = [
+    config.geminiModel,
+    config.geminiFallbackModel,
+    'gemini-flash-lite-latest',
+    'gemini-flash-latest',
+    'gemini-2.0-flash',
+    'gemini-1.5-flash-latest',
+    'gemini-1.5-flash',
+  ].filter((m): m is string => Boolean(m) && m !== '');
+
+  const uniqueModels = [...new Set(candidateModels)];
+
+  let text = '';
   let lastError: unknown = null;
 
-  for (const model of modelsToTry) {
-    // 1. Try @google/genai SDK first
-    try {
-      return await callGenAISDK(apiKey, model, systemPrompt, userPrompt);
-    } catch (sdk1Err) {
-      lastError = sdk1Err;
+  const ai = new GoogleGenAI({ apiKey: config.geminiApiKey! });
 
-      // 2. Try @google/generative-ai SDK fallback for the same model
+  for (const model of uniqueModels) {
+    try {
+      console.log(`[AI Reviewer] Invoking Google Gemini AI with model: '${model}'...`);
+      const response = await ai.models.generateContent({
+        model,
+        contents: prompt,
+        config: {
+          systemInstruction: systemPrompt,
+          responseMimeType: 'application/json',
+          temperature: 0.1,
+        },
+      });
+      text = response.text || '';
+      if (text) {
+        console.log(`[AI Reviewer] Successfully received AI review from model '${model}'!`);
+        break;
+      }
+    } catch (err: unknown) {
+      lastError = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[AI Reviewer Warning] Model '${model}' failed (${msg}). Trying next model...`);
+    }
+  }
+
+  // Secondary fallback: @google/generative-ai SDK if @google/genai exhausted
+  if (!text) {
+    for (const fallbackModel of ['gemini-flash-latest', 'gemini-1.5-flash']) {
       try {
-        return await callGenerativeAISDK(apiKey, model, systemPrompt, userPrompt);
-      } catch (sdk2Err) {
-        lastError = sdk2Err;
-        // Continue to next model in fallback list
+        console.log(`[AI Reviewer] Fallback attempting @google/generative-ai SDK with '${fallbackModel}'...`);
+        const genAI = new GoogleGenerativeAI(config.geminiApiKey!);
+        const model = genAI.getGenerativeModel({
+          model: fallbackModel,
+          systemInstruction: systemPrompt,
+          generationConfig: {
+            responseMimeType: 'application/json',
+            temperature: 0.1,
+          },
+        });
+        const result = await model.generateContent(prompt);
+        text = result.response.text();
+        if (text) {
+          console.log(`[AI Reviewer] Successfully received AI review from fallback model '${fallbackModel}'!`);
+          break;
+        }
+      } catch (fbErr: unknown) {
+        lastError = fbErr;
+        const msg = fbErr instanceof Error ? fbErr.message : String(fbErr);
+        console.warn(`[AI Reviewer Warning] Fallback model '${fallbackModel}' failed (${msg}). Trying next fallback...`);
       }
     }
   }
 
-  throw new Error(
-    `All Gemini models and SDKs failed in fallback chain. Last error: ${
-      lastError instanceof Error ? lastError.message : String(lastError)
-    }`,
-  );
+  if (!text && lastError) {
+    throw lastError;
+  }
+
+  if (!text) {
+    throw new Error('No response received from any candidate Gemini model or SDK fallback.');
+  }
+
+  return text;
 }
 
 /**
@@ -365,7 +360,12 @@ export async function performAIReview(
 ): Promise<PRReviewReport> {
   let aiResponse: RawAIReviewResponse;
 
-  if (config.dryRun && !config.geminiApiKey) {
+  const isPlaceholderKey =
+    !config.geminiApiKey ||
+    config.geminiApiKey === 'your-gemini-api-key-here' ||
+    config.geminiApiKey.startsWith('your-');
+
+  if (config.dryRun && isPlaceholderKey) {
     aiResponse = generateDryRunReview(context);
   } else {
     if (!config.geminiApiKey) {
@@ -374,8 +374,7 @@ export async function performAIReview(
 
     const { systemPrompt, userPrompt } = buildPrompts(context);
     const rawJson = await executeGeminiWithFallback(
-      config.geminiApiKey,
-      config.geminiModel,
+      config,
       systemPrompt,
       userPrompt,
     );

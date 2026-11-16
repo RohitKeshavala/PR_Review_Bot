@@ -112,7 +112,8 @@ export interface ReviewPayload {
 
 export interface AppConfig {
   geminiApiKey?: string;
-  geminiModel: string;
+  geminiModel?: string;
+  geminiFallbackModel?: string;
   githubToken?: string;
   githubRepository?: string;
   targetProjectPath: string;
