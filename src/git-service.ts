@@ -248,12 +248,14 @@ export function parseDiff(rawDiff: string): FileDiff[] {
 /**
  * Crucial safety check: Validates that a reported line number actually exists
  * inside an added or modified diff hunk for the given file.
+ * If addedOnly is true, ensures the line is specifically an added line ('+').
  * This eliminates GitHub 422 Unprocessable Entity errors when posting inline comments.
  */
 export function isLineInDiffHunk(
   filePath: string,
   lineNumber: number,
   fileDiffs: FileDiff[],
+  addedOnly = false,
 ): boolean {
   if (!filePath || !lineNumber || lineNumber <= 0) {
     return false;
@@ -282,6 +284,9 @@ export function isLineInDiffHunk(
       // In GitHub PR reviews, inline comments on the new file (RIGHT side)
       // must correspond to a line in the diff hunk.
       if (line.newLineNumber === lineNumber) {
+        if (addedOnly) {
+          return line.type === 'add';
+        }
         return true;
       }
     }
