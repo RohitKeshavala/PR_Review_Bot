@@ -17,7 +17,7 @@ An autonomous, polyglot AI Pull Request reviewer engineered to run across any co
 - **422 Unprocessable Entity Immunity**: Parses unified diff hunks into AST line mappings to guarantee inline comments only attach to actual added/changed lines in the PR diff. If a line mismatch occurs, a resilient top-level fallback comment is submitted.
 - **In-Place Sticky PR Commenting**: Updates existing PR review summary comments in place to eliminate comment spam across iterative commits.
 - **Polyglot Workspace Inspection**: Automatically detects and executes environment build, test, and lint scripts across Node.js (`npm`), Python (`pytest`, `ruff`), Go (`go test`), and Rust (`cargo test`).
-- **Resilient AI Reasoning Engine**: Dual-SDK integration (`@google/genai` and `@google/generative-ai`) backed by an automated model fallback chain (`gemini-2.5-flash` ➔ `gemini-flash-latest` ➔ `gemini-1.5-flash`) with structured JSON schema outputs.
+- **Resilient AI Reasoning Engine**: Powered by the official `@google/genai` SDK backed by an automated model fallback chain (`gemini-3.5-flash` ➔ `gemini-flash-lite-latest` ➔ `gemini-flash-latest`) with deterministic evaluation (`temperature: 0.0`) and structured JSON schema outputs.
 
 ---
 

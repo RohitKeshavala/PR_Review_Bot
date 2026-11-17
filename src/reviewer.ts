@@ -1,5 +1,4 @@
 import { GoogleGenAI } from '@google/genai';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import type { ReviewContext } from './context-builder.js';
 import { isLineInDiffHunk } from './git-service.js';
 import type {
@@ -108,7 +107,7 @@ export function safeParseAIResponse(raw: string): RawAIReviewResponse {
 }
 
 /**
- * Executes query with dual-SDK and multi-model fallback chain aligned with debugging-agent architecture
+ * Executes query using official GoogleGenAI SDK with dynamic multi-model fallback chain
  */
 async function executeGeminiWithFallback(
   config: AppConfig,
@@ -121,9 +120,9 @@ async function executeGeminiWithFallback(
   const candidateModels = [
     config.geminiModel,
     config.geminiFallbackModel,
-    'gemini-3.5-flash',
     'gemini-flash-lite-latest',
     'gemini-flash-latest',
+    'gemini-3.5-flash',
     'gemini-3.5-flash-lite',
     'gemini-3.8-flash',
     'gemini-3.8-flash-lite',
@@ -144,7 +143,7 @@ async function executeGeminiWithFallback(
         config: {
           systemInstruction: systemPrompt,
           responseMimeType: 'application/json',
-          temperature: 0.1,
+          temperature: 0.0,
         },
       });
 
@@ -167,44 +166,11 @@ async function executeGeminiWithFallback(
     }
   }
 
-  // Secondary fallback: @google/generative-ai SDK using the same unified models list
-  for (const fallbackModel of uniqueModels) {
-    try {
-      console.log(`[AI Reviewer] Fallback attempting @google/generative-ai SDK with '${fallbackModel}'...`);
-      const genAI = new GoogleGenerativeAI(config.geminiApiKey!);
-      const model = genAI.getGenerativeModel({
-        model: fallbackModel,
-        systemInstruction: systemPrompt,
-        generationConfig: {
-          responseMimeType: 'application/json',
-          temperature: 0.1,
-        },
-      });
-      const result = await model.generateContent(prompt);
-      const text = result.response.text();
-      if (text) {
-        try {
-          const parsed = safeParseAIResponse(text);
-          console.log(`[AI Reviewer] Successfully received and validated AI review JSON from fallback model '${fallbackModel}'!`);
-          return { rawText: text, parsed };
-        } catch (parseErr: unknown) {
-          const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
-          console.warn(`[AI Reviewer Warning] Fallback model '${fallbackModel}' produced malformed JSON (${msg}). Trying next fallback...`);
-          lastError = parseErr;
-        }
-      }
-    } catch (fbErr: unknown) {
-      lastError = fbErr;
-      const msg = fbErr instanceof Error ? fbErr.message : String(fbErr);
-      console.warn(`[AI Reviewer Warning] Fallback model '${fallbackModel}' failed (${msg}). Trying next fallback...`);
-    }
-  }
-
   if (lastError) {
     throw lastError;
   }
 
-  throw new Error('No valid response received from any candidate Gemini model or SDK fallback.');
+  throw new Error('No valid response received from any candidate Gemini model in the fallback chain.');
 }
 
 /**
