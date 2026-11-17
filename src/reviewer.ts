@@ -1,4 +1,4 @@
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
 import type { ReviewContext } from './context-builder.js';
 import { isLineInDiffHunk } from './git-service.js';
 import type {
@@ -29,8 +29,63 @@ interface RawAIReviewResponse {
 }
 
 /**
+ * Strict OpenAPI-compatible response schema for Gemini grammar-constrained decoding
+ */
+const REVIEW_RESPONSE_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    summary: {
+      type: Type.STRING,
+      description: 'Comprehensive 2-4 sentence executive summary of changes and overall review assessment.',
+    },
+    findings: {
+      type: Type.ARRAY,
+      description: 'List of all concrete, actionable defects identified in added or modified code.',
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          filePath: { type: Type.STRING, description: 'File path matching a file in the diff.' },
+          lineNumber: { type: Type.INTEGER, description: 'Line number in the new file on an added line.' },
+          title: { type: Type.STRING, description: 'Short descriptive title of defect.' },
+          severity: {
+            type: Type.STRING,
+            enum: ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFORMATIONAL'],
+          },
+          category: {
+            type: Type.STRING,
+            enum: [
+              'Security',
+              'Performance',
+              'Correctness',
+              'Error Handling',
+              'API Design',
+              'Maintainability',
+              'Testing',
+            ],
+          },
+          problem: { type: Type.STRING, description: 'Clear explanation of the bug or architectural defect.' },
+          whyItMatters: { type: Type.STRING, description: 'Impact explanation.' },
+          recommendationDiff: { type: Type.STRING, description: 'Suggested replacement code or fix.' },
+        },
+        required: [
+          'filePath',
+          'lineNumber',
+          'title',
+          'severity',
+          'category',
+          'problem',
+          'whyItMatters',
+        ],
+      },
+    },
+  },
+  required: ['summary', 'findings'],
+};
+
+/**
  * Safely parses and repairs AI JSON responses, handling markdown wrappers,
- * rogue leading/trailing text, and unescaped double quotes inside code snippets.
+ * unescaped newlines/tabs inside string literals, trailing commas,
+ * rogue leading/trailing text, and unescaped quotes inside code snippets.
  */
 export function safeParseAIResponse(raw: string): RawAIReviewResponse {
   if (!raw || raw.trim().length === 0) {
@@ -62,40 +117,120 @@ export function safeParseAIResponse(raw: string): RawAIReviewResponse {
     // Fall through to repair logic
   }
 
-  // 4. Line-by-line repair of unescaped quotes in property values
-  try {
-    const lines = cleaned.split('\n');
-    const repairedLines = lines.map((line) => {
-      // Matches standard JSON string property line: "key": "content..." (with optional trailing comma)
-      const match = line.match(/^(\s*"[a-zA-Z0-9_]+"\s*:\s*")(.*)("(?:\s*,|\s*)?)$/);
-      if (match) {
-        const [, prefix, content, suffix] = match;
-        // Escape quotes that are not already escaped
-        const escapedContent = content.replace(/(?<!\\)"/g, '\\"');
-        return `${prefix}${escapedContent}${suffix}`;
-      }
-      return line;
-    });
+  // 4. Sanitize unescaped control characters inside string literals (raw newlines, tabs, carriage returns)
+  let inString = false;
+  let escaped = false;
+  let sanitized = '';
 
-    const repaired = repairedLines.join('\n');
-    const parsed = JSON.parse(repaired) as RawAIReviewResponse;
+  for (let i = 0; i < cleaned.length; i++) {
+    const char = cleaned[i];
+
+    if (escaped) {
+      sanitized += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaped = true;
+      sanitized += char;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      sanitized += char;
+      continue;
+    }
+
+    if (inString) {
+      if (char === '\n') {
+        sanitized += '\\n';
+      } else if (char === '\r') {
+        sanitized += '\\r';
+      } else if (char === '\t') {
+        sanitized += '\\t';
+      } else if (char.charCodeAt(0) < 32) {
+        sanitized += `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`;
+      } else {
+        sanitized += char;
+      }
+    } else {
+      sanitized += char;
+    }
+  }
+
+  // 5. Remove trailing commas before } or ]
+  sanitized = sanitized.replace(/,\s*([}\]])/g, '$1');
+
+  try {
+    const parsed = JSON.parse(sanitized) as RawAIReviewResponse;
     if (parsed && typeof parsed === 'object') {
       return parsed;
     }
   } catch {
-    // Fall through to multiline repair
+    // Fall through to quote repair
   }
 
-  // 5. Multiline regex repair for fields spanning lines
+  // 6. Regex repair for unescaped internal quotes inside common fields
   try {
-    const multilineRepaired = cleaned.replace(
+    const quoteRepaired = sanitized.replace(
       /"(recommendationDiff|problem|whyItMatters|title|summary)"\s*:\s*"([\s\S]*?)"(?=\s*(?:,|\n\s*\}|\n\s*\]))/g,
       (_match, key, val) => {
         const escapedVal = val.replace(/(?<!\\)"/g, '\\"');
         return `"${key}": "${escapedVal}"`;
       },
     );
-    const parsed = JSON.parse(multilineRepaired) as RawAIReviewResponse;
+    const parsed = JSON.parse(quoteRepaired) as RawAIReviewResponse;
+    if (parsed && typeof parsed === 'object') {
+      return parsed;
+    }
+  } catch {
+    // Fall through to auto-close truncated JSON
+  }
+
+  // 7. Auto-close truncated JSON if stream was cut off (LIFO stack)
+  try {
+    const stack: string[] = [];
+    let inStr = false;
+    let isEsc = false;
+
+    for (let i = 0; i < sanitized.length; i++) {
+      const c = sanitized[i];
+      if (isEsc) {
+        isEsc = false;
+        continue;
+      }
+      if (c === '\\') {
+        isEsc = true;
+        continue;
+      }
+      if (c === '"') {
+        inStr = !inStr;
+        continue;
+      }
+      if (!inStr) {
+        if (c === '{') stack.push('}');
+        else if (c === '[') stack.push(']');
+        else if (c === '}' || c === ']') {
+          if (stack.length > 0 && stack[stack.length - 1] === c) {
+            stack.pop();
+          }
+        }
+      }
+    }
+
+    let completed = sanitized.trim();
+    if (inStr) completed += '"';
+    completed = completed.replace(/,\s*$/, '');
+    completed = completed.replace(/:\s*$/, ': null');
+    completed = completed.replace(/,\s*([}\]])/g, '$1');
+
+    while (stack.length > 0) {
+      completed += stack.pop();
+    }
+
+    const parsed = JSON.parse(completed) as RawAIReviewResponse;
     if (parsed && typeof parsed === 'object') {
       return parsed;
     }
@@ -114,16 +249,17 @@ async function executeGeminiWithFallback(
   systemPrompt: string,
   userPrompt: string,
 ): Promise<{ rawText: string; parsed: RawAIReviewResponse }> {
-  // Candidate models: latest active Gemini 3.x and universal aliases
+  // Candidate models: ordered by reasoning capability (flagship flash -> workhorse -> aliases -> lite)
+  // gemini-3.8-flash-lite was removed because it is an audio/TTS model and returns 404 for generateContent.
   const candidateModels = [
     config.geminiModel,
     config.geminiFallbackModel,
-    'gemini-flash-lite-latest',
-    'gemini-flash-latest',
-    'gemini-3.5-flash',
-    'gemini-3.5-flash-lite',
     'gemini-3.8-flash',
-    'gemini-3.8-flash-lite',
+    'gemini-3.6-flash',
+    'gemini-3.5-flash',
+    'gemini-flash-latest',
+    'gemini-3.5-flash-lite',
+    'gemini-flash-lite-latest',
   ].filter((m): m is string => Boolean(m) && m !== '');
 
   const uniqueModels = [...new Set(candidateModels)];
@@ -133,34 +269,56 @@ async function executeGeminiWithFallback(
   const ai = new GoogleGenAI({ apiKey: config.geminiApiKey! });
 
   for (const model of uniqueModels) {
-    try {
-      console.log(`[AI Reviewer] Invoking Google Gemini AI with model: '${model}'...`);
-      const response = await ai.models.generateContent({
-        model,
-        contents: userPrompt,
-        config: {
-          systemInstruction: systemPrompt,
-          responseMimeType: 'application/json',
-          temperature: 0.0,
-        },
-      });
+    // Allow up to 2 attempts per model for transient high-demand (503) or rate-limit (429) spikes
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        console.log(`[AI Reviewer] Invoking Google Gemini AI with model: '${model}'${attempt > 1 ? ` (attempt ${attempt})` : ''}...`);
+        const response = await ai.models.generateContent({
+          model,
+          contents: userPrompt,
+          config: {
+            systemInstruction: systemPrompt,
+            responseMimeType: 'application/json',
+            responseSchema: REVIEW_RESPONSE_SCHEMA,
+            temperature: 0.0,
+          },
+        });
 
-      const text = response.text || '';
-      if (text) {
-        try {
-          const parsed = safeParseAIResponse(text);
-          console.log(`[AI Reviewer] Successfully received and validated AI review JSON from model '${model}'!`);
-          return { rawText: text, parsed };
-        } catch (parseErr: unknown) {
-          const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
-          console.warn(`[AI Reviewer Warning] Model '${model}' produced malformed JSON (${msg}). Trying next model in fallback chain...`);
-          lastError = parseErr;
+        const text = response.text || '';
+        if (text) {
+          try {
+            const parsed = safeParseAIResponse(text);
+            console.log(`[AI Reviewer] Successfully received and validated AI review JSON from model '${model}'!`);
+            return { rawText: text, parsed };
+          } catch (parseErr: unknown) {
+            const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+            const snippet = text.slice(0, 200).replace(/\r?\n/g, ' ');
+            console.warn(`[AI Reviewer Warning] Model '${model}' produced malformed JSON (${msg}). Output preview: "${snippet}..."`);
+            lastError = parseErr;
+            // Break inner retry on parse error to try next model in chain
+            break;
+          }
         }
+        break;
+      } catch (err: unknown) {
+        lastError = err;
+        const msg = err instanceof Error ? err.message : String(err);
+        const isTransient =
+          msg.includes('503') ||
+          msg.includes('high demand') ||
+          msg.includes('UNAVAILABLE') ||
+          msg.includes('429') ||
+          msg.includes('RESOURCE_EXHAUSTED');
+
+        if (isTransient && attempt === 1) {
+          console.warn(`[AI Reviewer Warning] Model '${model}' experienced transient high demand (503/429). Retrying in 2 seconds...`);
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          continue;
+        }
+
+        console.warn(`[AI Reviewer Warning] Model '${model}' failed (${msg}). Trying next model...`);
+        break;
       }
-    } catch (err: unknown) {
-      lastError = err;
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[AI Reviewer Warning] Model '${model}' failed (${msg}). Trying next model...`);
     }
   }
 
