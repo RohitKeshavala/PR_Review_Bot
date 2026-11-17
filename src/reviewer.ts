@@ -122,12 +122,9 @@ async function executeGeminiWithFallback(
     config.geminiModel,
     config.geminiFallbackModel,
     'gemini-3.5-flash',
-    'gemini-2.5-flash',
     'gemini-flash-lite-latest',
     'gemini-flash-latest',
-    'gemini-2.0-flash',
-    'gemini-1.5-flash-latest',
-    'gemini-1.5-flash',
+    'gemini-3.8-flash'
   ].filter((m): m is string => Boolean(m) && m !== '');
 
   const uniqueModels = [...new Set(candidateModels)];
