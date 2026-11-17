@@ -269,56 +269,36 @@ async function executeGeminiWithFallback(
   const ai = new GoogleGenAI({ apiKey: config.geminiApiKey! });
 
   for (const model of uniqueModels) {
-    // Allow up to 2 attempts per model for transient high-demand (503) or rate-limit (429) spikes
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        console.log(`[AI Reviewer] Invoking Google Gemini AI with model: '${model}'${attempt > 1 ? ` (attempt ${attempt})` : ''}...`);
-        const response = await ai.models.generateContent({
-          model,
-          contents: userPrompt,
-          config: {
-            systemInstruction: systemPrompt,
-            responseMimeType: 'application/json',
-            responseSchema: REVIEW_RESPONSE_SCHEMA,
-            temperature: 0.0,
-          },
-        });
+    try {
+      console.log(`[AI Reviewer] Invoking Google Gemini AI with model: '${model}'...`);
+      const response = await ai.models.generateContent({
+        model,
+        contents: userPrompt,
+        config: {
+          systemInstruction: systemPrompt,
+          responseMimeType: 'application/json',
+          responseSchema: REVIEW_RESPONSE_SCHEMA,
+          temperature: 0.0,
+        },
+      });
 
-        const text = response.text || '';
-        if (text) {
-          try {
-            const parsed = safeParseAIResponse(text);
-            console.log(`[AI Reviewer] Successfully received and validated AI review JSON from model '${model}'!`);
-            return { rawText: text, parsed };
-          } catch (parseErr: unknown) {
-            const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
-            const snippet = text.slice(0, 200).replace(/\r?\n/g, ' ');
-            console.warn(`[AI Reviewer Warning] Model '${model}' produced malformed JSON (${msg}). Output preview: "${snippet}..."`);
-            lastError = parseErr;
-            // Break inner retry on parse error to try next model in chain
-            break;
-          }
+      const text = response.text || '';
+      if (text) {
+        try {
+          const parsed = safeParseAIResponse(text);
+          console.log(`[AI Reviewer] Successfully received and validated AI review JSON from model '${model}'!`);
+          return { rawText: text, parsed };
+        } catch (parseErr: unknown) {
+          const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+          const snippet = text.slice(0, 200).replace(/\r?\n/g, ' ');
+          console.warn(`[AI Reviewer Warning] Model '${model}' produced malformed JSON (${msg}). Output preview: "${snippet}..."`);
+          lastError = parseErr;
         }
-        break;
-      } catch (err: unknown) {
-        lastError = err;
-        const msg = err instanceof Error ? err.message : String(err);
-        const isTransient =
-          msg.includes('503') ||
-          msg.includes('high demand') ||
-          msg.includes('UNAVAILABLE') ||
-          msg.includes('429') ||
-          msg.includes('RESOURCE_EXHAUSTED');
-
-        if (isTransient && attempt === 1) {
-          console.warn(`[AI Reviewer Warning] Model '${model}' experienced transient high demand (503/429). Retrying in 2 seconds...`);
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-          continue;
-        }
-
-        console.warn(`[AI Reviewer Warning] Model '${model}' failed (${msg}). Trying next model...`);
-        break;
       }
+    } catch (err: unknown) {
+      lastError = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[AI Reviewer Warning] Model '${model}' failed (${msg}). Trying next model...`);
     }
   }
 
