@@ -117,14 +117,16 @@ async function executeGeminiWithFallback(
 ): Promise<{ rawText: string; parsed: RawAIReviewResponse }> {
   const prompt = `${systemPrompt}\n\n${userPrompt}`;
 
-  // Candidate models aligned with debugging-agent architecture
+  // Candidate models: latest active Gemini 3.x and universal aliases
   const candidateModels = [
     config.geminiModel,
     config.geminiFallbackModel,
     'gemini-3.5-flash',
-    // 'gemini-flash-lite-latest',
-    // 'gemini-flash-latest',
-    // 'gemini-3.8-flash'
+    'gemini-flash-lite-latest',
+    'gemini-flash-latest',
+    'gemini-3.5-flash-lite',
+    'gemini-3.8-flash',
+    'gemini-3.8-flash-lite',
   ].filter((m): m is string => Boolean(m) && m !== '');
 
   const uniqueModels = [...new Set(candidateModels)];
@@ -165,8 +167,8 @@ async function executeGeminiWithFallback(
     }
   }
 
-  // Secondary fallback: @google/generative-ai SDK if @google/genai exhausted
-  for (const fallbackModel of ['gemini-flash-latest', 'gemini-1.5-flash', 'gemini-2.0-flash']) {
+  // Secondary fallback: @google/generative-ai SDK using the same unified models list
+  for (const fallbackModel of uniqueModels) {
     try {
       console.log(`[AI Reviewer] Fallback attempting @google/generative-ai SDK with '${fallbackModel}'...`);
       const genAI = new GoogleGenerativeAI(config.geminiApiKey!);
