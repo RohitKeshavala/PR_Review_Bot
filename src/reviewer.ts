@@ -114,8 +114,6 @@ async function executeGeminiWithFallback(
   systemPrompt: string,
   userPrompt: string,
 ): Promise<{ rawText: string; parsed: RawAIReviewResponse }> {
-  const prompt = `${systemPrompt}\n\n${userPrompt}`;
-
   // Candidate models: latest active Gemini 3.x and universal aliases
   const candidateModels = [
     config.geminiModel,
@@ -139,7 +137,7 @@ async function executeGeminiWithFallback(
       console.log(`[AI Reviewer] Invoking Google Gemini AI with model: '${model}'...`);
       const response = await ai.models.generateContent({
         model,
-        contents: prompt,
+        contents: userPrompt,
         config: {
           systemInstruction: systemPrompt,
           responseMimeType: 'application/json',
@@ -186,11 +184,17 @@ ${context.principles}
 
 Rules for Review:
 1. NO SPECULATIVE / THEORETICAL ISSUES: Do NOT raise "what-if" issues, theoretical design preferences, or hypothetical future misuse scenarios (e.g., "if someone in the future uses this field for dynamic data"). Only report concrete, demonstrable bugs, fatal exceptions, or security vulnerabilities that exist in this exact code right now.
-2. HIGH CONFIDENCE THRESHOLD: Only report an issue if you have >= 90% confidence that it is an actual defect or regression introduced by this PR. When in doubt, prefer silence over false alarms.
+2. HIGH CONFIDENCE THRESHOLD & EXHAUSTIVENESS REQUIREMENT:
+   - Only report an issue if you have >= 90% confidence that it is an actual defect or regression introduced by this PR.
+   - Review EVERY hunk of EVERY file in this request before answering.
+   - Report ALL concrete defects that meet the confidence bar in THIS single pass.
+   - Do NOT hold back findings for later reviews. Do NOT stop after a few findings.
+   - ONLY report issues on lines marked '+' (added/modified). Unchanged code is context only.
+   - lineNumber MUST be a line number shown in the diff for an added line.
 3. FOCUS ON BLOCKERS: Reserve CRITICAL and HIGH strictly for catastrophic defects (fatal runtime exceptions, authentication bypass, active injection, data loss, hardcoded secrets). Minor style suggestions, naming improvements, or non-fatal refactors must be LOW or INFORMATIONAL.
 4. For every finding:
    - Identify the exact filePath (must match a file in the diff).
-   - Identify the lineNumber in the NEW file where the defect or improvement occurs.
+   - Identify the lineNumber in the NEW file where the defect or improvement occurs (MUST be a line number shown in the diff for an added line marked '+').
    - Assign severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFORMATIONAL'.
    - Assign category: 'Security' | 'Performance' | 'Correctness' | 'Error Handling' | 'API Design' | 'Maintainability' | 'Testing'.
    - Detail the problem clearly.
@@ -399,7 +403,7 @@ export async function performAIReview(
 
   // Validate diff hunk boundaries for each finding
   const validatedFindings: PRFinding[] = (aiResponse.findings || []).map((f) => {
-    const inHunk = isLineInDiffHunk(f.filePath, f.lineNumber, context.fileDiffs);
+    const inHunk = isLineInDiffHunk(f.filePath, f.lineNumber, context.fileDiffs, true);
     return {
       filePath: f.filePath,
       lineNumber: f.lineNumber,

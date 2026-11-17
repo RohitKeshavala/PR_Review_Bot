@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { FileDiff } from './types.js';
+import type { DiffHunk, FileDiff } from './types.js';
 
 export const UNIVERSAL_REVIEW_PRINCIPLES = `
 === 12-STEP UNIVERSAL CODE REVIEW PRINCIPLES ===
@@ -122,9 +122,85 @@ function detectLanguages(fileDiffs: FileDiff[]): string[] {
 }
 
 /**
- * Reads full contents of modified files in the target project with safety limits
+ * Extracts line windows around diff hunks with gap markers for large files.
+ * Line ranges [hunkStart - contextLines, hunkEnd + contextLines] are included,
+ * overlapping or adjacent ranges are merged, and gaps marked with /* ... lines X-Y omitted ... *\/
  */
-function loadTargetFileContents(
+export function extractHunkWindows(
+  lines: string[],
+  hunks: DiffHunk[],
+  contextLines = 40,
+): string {
+  if (lines.length === 0) {
+    return '/* [Empty file] */';
+  }
+
+  if (!hunks || hunks.length === 0) {
+    return `/* ... lines 1-${lines.length} omitted (no diff hunks found) ... */`;
+  }
+
+  const rawRanges: { start: number; end: number }[] = [];
+
+  for (const hunk of hunks) {
+    const hunkStart = hunk.newStart;
+    const hunkEnd = hunk.newStart + Math.max(0, hunk.newLines - 1);
+    const start = Math.max(1, hunkStart - contextLines);
+    const end = Math.min(lines.length, hunkEnd + contextLines);
+    if (start <= end) {
+      rawRanges.push({ start, end });
+    }
+  }
+
+  if (rawRanges.length === 0) {
+    return `/* ... lines 1-${lines.length} omitted (no diff hunks found) ... */`;
+  }
+
+  // Sort ranges by start line ascending
+  rawRanges.sort((a, b) => a.start - b.start);
+
+  // Merge overlapping and adjacent ranges
+  const mergedRanges: { start: number; end: number }[] = [];
+  for (const r of rawRanges) {
+    if (mergedRanges.length === 0) {
+      mergedRanges.push({ ...r });
+    } else {
+      const prev = mergedRanges[mergedRanges.length - 1];
+      if (r.start <= prev.end + 1) {
+        prev.end = Math.max(prev.end, r.end);
+      } else {
+        mergedRanges.push({ ...r });
+      }
+    }
+  }
+
+  const output: string[] = [];
+  let currentLine = 1;
+
+  for (const r of mergedRanges) {
+    if (r.start > currentLine) {
+      output.push(`/* ... lines ${currentLine}-${r.start - 1} omitted ... */`);
+    }
+
+    for (let i = r.start; i <= r.end; i++) {
+      output.push(`${i}: ${lines[i - 1]}`);
+    }
+
+    currentLine = r.end + 1;
+  }
+
+  if (currentLine <= lines.length) {
+    output.push(`/* ... lines ${currentLine}-${lines.length} omitted ... */`);
+  }
+
+  return output.join('\n');
+}
+
+/**
+ * Reads full contents of modified files in the target project with safety limits.
+ * For large files (> 60,000 chars or > 500KB), embeds hunk windows [hunkStart - 40, hunkEnd + 40]
+ * with merged overlapping ranges and omission markers instead of head-truncation or skipping.
+ */
+export function loadTargetFileContents(
   targetPath: string,
   fileDiffs: FileDiff[],
   maxCharsPerFile = 60000,
@@ -140,22 +216,16 @@ function loadTargetFileContents(
     if (fs.existsSync(fullPath)) {
       try {
         const stats = fs.statSync(fullPath);
-        if (stats.size > 500 * 1024) {
-          // File is too large (> 500KB), skip embedding full file to prevent prompt exhaustion
-          contents[relPath] = `/* [File omitted from context: size ${Math.round(stats.size / 1024)}KB exceeds review threshold] */`;
-          continue;
-        }
+        const isOverSizeThreshold = stats.size > 500 * 1024;
 
         const raw = fs.readFileSync(fullPath, 'utf-8');
-        // Add line numbering for easy AI line reference
         const lines = raw.split('\n');
-        if (raw.length > maxCharsPerFile) {
-          // Truncate if exceeds character limit
-          const truncatedLines = lines.slice(0, 1000);
-          contents[relPath] = truncatedLines
-            .map((l, idx) => `${idx + 1}: ${l}`)
-            .join('\n') + `\n/* ... [Truncated: Total ${lines.length} lines] ... */`;
+
+        if (isOverSizeThreshold || raw.length > maxCharsPerFile) {
+          // Large file: embed hunk-window context instead of head-truncation or bare omitted placeholder
+          contents[relPath] = extractHunkWindows(lines, diff.hunks, 40);
         } else {
+          // Normal file: embed full file with line numbering
           contents[relPath] = lines.map((l, idx) => `${idx + 1}: ${l}`).join('\n');
         }
       } catch (err) {
