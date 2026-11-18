@@ -13,6 +13,12 @@ export const UNIVERSAL_REVIEW_PRINCIPLES = `
 2. LOGIC, NULLABILITY & BOUNDARY DEFENSES:
    - Verify handling of undefined, null, empty arrays, NaN, zero, and boundary inputs.
    - Check for off-by-one errors, reversed conditionals, and unhandled enum/switch branches.
+   - SCHEMA & INPUT BOUNDARY VALIDATION: In request validation schemas, DTOs, and model definitions across any language/framework (Zod, Pydantic, Joi, class-validator, Marshmallow, etc.):
+     * Enforce string trimming before length checks to prevent whitespace-only bypass on required fields.
+     * Enforce explicit upper-bound limits (max length/size) on all string, text, and collection inputs to prevent buffer bloat, database column truncation, and payload DoS.
+     * Enforce non-empty lower bounds on required fields.
+     * Guard against mass-assignment: strictly exclude client-controlled identity/role fields (e.g., authorId, userId, role, isAdmin) from request schemas.
+     * Flag missing schema boundary limits or unconstrained input schemas as a MEDIUM severity defect.
    - Ensure proper input validation and sanitization at all external boundaries.
 
 3. ASYNC FLOWS, REACTIVITY & STATE MANAGEMENT:
@@ -422,8 +428,9 @@ export function getFrameworkGuidelines(frameworks: string[]): string {
    - Enforce parameterized query bindings ('?', '$1'). Flag raw string interpolation in SQL queries (e.g., DELETE FROM ... WHERE id = '\${id}') as CRITICAL SQL Injection.
 3. Asynchronous Error Propagation:
    - Ensure all asynchronous route handlers catch errors and delegate to next(err) to avoid unhandled promise rejections or hung requests.
-4. Schema & Input Validation:
-   - Enforce schema validation (Zod, Joi, class-validator) on all req.body, req.params, and req.query.`);
+4. Schema & Input Boundary Validation:
+   - Enforce schema validation (Zod, Joi, class-validator) on all req.body, req.params, and req.query.
+   - Enforce trimming before length checks, non-empty minimum lengths, and explicit maximum length bounds on user inputs. Exclude client-controlled identity/role fields to prevent mass assignment. Flag missing schema boundary limits as MEDIUM severity.`);
   }
 
   if (frameworks.includes('FastAPI') || frameworks.includes('Django')) {
@@ -433,7 +440,9 @@ export function getFrameworkGuidelines(frameworks: string[]): string {
 2. ORM & Query Safety:
    - Avoid raw SQL interpolation. Prevent N+1 queries using select_related() / prefetch_related().
 3. Object-Level Permissions:
-   - Verify that the authenticated user is authorized to access or mutate the requested record.`);
+   - Verify that the authenticated user is authorized to access or mutate the requested record.
+4. Schema & Model Boundaries:
+   - Enforce Pydantic / Serializer boundaries: apply strip_whitespace, min_length, and explicit max_length constraints on user inputs to prevent memory bloat and DoS.`);
   }
 
   if (frameworks.includes('Spring Boot')) {
@@ -449,7 +458,8 @@ export function getFrameworkGuidelines(frameworks: string[]): string {
 1. State & Reactivity: Flag in-place mutation of arrays or objects held in reactive state stores or signals before setting them, as it breaks referential equality (Object.is) checks.
 2. Resource Cleanup: Verify that timers (setInterval, setTimeout), event listeners, and data subscriptions are cleaned up when components or transient scopes are destroyed.
 3. Authorization & Permissions: Ensure all mutating endpoints enforce object-level ownership checks (BOLA/IDOR protection).
-4. Injection Protection: Prohibit raw string interpolation into database queries and template innerHTML bindings.`);
+4. Schema & Input Boundaries: Enforce trimming, explicit max length/size limits, and non-empty checks on user input schemas; flag missing bounds as MEDIUM severity.
+5. Injection Protection: Prohibit raw string interpolation into database queries and template innerHTML bindings.`);
   }
 
   return sections.join('\n\n');
