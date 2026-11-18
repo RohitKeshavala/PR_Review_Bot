@@ -19,6 +19,7 @@ export const UNIVERSAL_REVIEW_PRINCIPLES = `
    - Identify missing 'await', unhandled Promise rejections, floating promises.
    - Audit race conditions, shared mutable state, lack of atomic operations or mutexes.
    - STATE & REACTIVITY INTEGRITY: In reactive systems (Angular Signals, React state, Vue ref/reactive, Redux/Zustand), strictly audit state mutations. Enforce immutability. Flag in-place mutations of objects or arrays (e.g., 'signal().push(...)', 'state.list.push(...)') before calling '.set()' or dispatching, because referential equality ('Object.is') prevents change detection, computed signal updates, or component re-renders from firing.
+   - ASYNC LOADING & UI STATE LIFECYCLES: Verify that loading, busy, or pending flags and signals correctly track asynchronous operations (activated prior to request initiation and reset upon completion or error). Flag dead, inverted, or redundant state transitions that break progress indicators or cause premature empty-state flashes.
    - Ensure timeouts and cancellation tokens (e.g., AbortSignal) are honored.
 
 4. SECURITY & PERMISSION ENFORCEMENT:
@@ -381,7 +382,10 @@ export function getFrameworkGuidelines(frameworks: string[]): string {
 3. Template Security:
    - Untrusted or user-supplied content MUST NOT be bound via [innerHTML]="..." due to Stored/Reflected XSS risks. Require safe text interpolation {{ ... }} or explicit sanitization via DomSanitizer.
 4. Change Detection:
-   - Avoid side-effects inside computed() signals. In Zoneless or OnPush components, ensure all state updates notify signals or call ChangeDetectorRef.`);
+   - Avoid side-effects inside computed() signals. In Zoneless or OnPush components, ensure all state updates notify signals or call ChangeDetectorRef.
+5. Async UI State Lifecycles:
+   - Ensure loading and pending state signals correctly wrap asynchronous operations (activated prior to dispatching requests and reset in both completion and error callbacks).
+   - Flag inverted, dead, or redundant state transitions that prevent progress indicators from displaying or cause premature empty-state flashes.`);
   }
 
   if (frameworks.includes('React') || frameworks.includes('Next.js')) {
@@ -394,7 +398,9 @@ export function getFrameworkGuidelines(frameworks: string[]): string {
    - Client components using hooks or browser APIs must have 'use client'.
    - Server secrets, database handles, and private keys must never be imported or exposed in client components.
 4. Security:
-   - Flag unsanitized dangerouslySetInnerHTML as XSS.`);
+   - Flag unsanitized dangerouslySetInnerHTML as XSS.
+5. Async Loading & State Lifecycles:
+   - Ensure loading/busy state (e.g. setLoading(true)) is set before async calls and reset in finally/completion blocks. Flag redundant or inverted loading flags.`);
   }
 
   if (frameworks.includes('Vue.js') || frameworks.includes('Nuxt')) {

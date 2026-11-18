@@ -328,7 +328,7 @@ ${context.principles}
 Rules for Review:
 1. DISTINGUISH CONCRETE DEFECTS FROM SPECULATIVE OPINIONS:
    - Do NOT raise purely speculative "what-if" future opinions, subjective naming debates, or aesthetic formatting preferences.
-   - MUST report real, concrete defects introduced in this PR: security vulnerabilities, broken object-level authorization (BOLA), broken state/reactivity tracking (e.g. in-place signal mutations), memory leaks (uncleared intervals/subscriptions), logic flaws, unhandled error conditions, and injection flaws.
+   - MUST report real, concrete defects introduced in this PR: security vulnerabilities, broken object-level authorization (BOLA), broken state/reactivity tracking (e.g. in-place signal mutations), inverted or dead async loading state flags, memory leaks (uncleared intervals/subscriptions), logic flaws, unhandled error conditions, and injection flaws.
 2. EXHAUSTIVE MULTI-TIER AUDIT:
    - Review EVERY hunk of EVERY file in this diff. Do not stop after a few findings.
    - Audit BOTH frontend components/templates and backend services/routes with equal rigor.
@@ -337,10 +337,10 @@ Rules for Review:
 3. SEVERITY TIERS CALIBRATION:
    - CRITICAL: Active security breaches (SQL injection, hardcoded secrets, unauthenticated remote execution) or fatal server-crashing defects.
    - HIGH: Broken Object Level Authorization (BOLA/IDOR), Stored/Reflected XSS, privilege escalation, or major data loss.
-   - MEDIUM: Functional defects, broken framework reactivity (such as in-place Angular signal mutation bypassing change detection), resource leaks (uncleared intervals/timers/subscriptions), or unhandled edge cases.
+   - MEDIUM: Functional defects, broken framework reactivity (such as in-place state mutation bypassing change detection), resource leaks (uncleared intervals/timers/subscriptions), dead or inverted async state flags, or unhandled edge cases.
    - LOW: Minor boundary oversights, missing defensive defaults, or non-critical edge cases.
    - INFORMATIONAL: Significant architectural or maintainability insights.
-   - CRITICAL NOTICE ON REACTIVE MUTATION: Do NOT dismiss reactive state mutation (e.g. \`this.signal().push(x); this.signal.set(...)\`) as a minor style choice; in reactive frameworks it halts UI synchronization and is a functional bug (MEDIUM or HIGH).
+   - CRITICAL NOTICE ON REACTIVE MUTATION: Do NOT dismiss in-place mutation of reactive state or signals as a minor style choice; in reactive frameworks it breaks referential equality tracking (Object.is), halts UI synchronization, and is a functional bug (MEDIUM or HIGH).
 4. HIGH CONFIDENCE BAR:
    - Report issues when you have >= 85% confidence that the code introduces a real vulnerability, bug, or anti-pattern that impairs correctness, security, or stability.
 5. For every finding:
