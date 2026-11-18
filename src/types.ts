@@ -74,6 +74,8 @@ export interface PRReviewReport {
   summary: string;
   stats: PRReviewStats;
   findings: PRFinding[];
+  detectedLanguages?: string[];
+  detectedFrameworks?: string[];
   targetPath?: string;
   baseBranch?: string;
   headBranch?: string;

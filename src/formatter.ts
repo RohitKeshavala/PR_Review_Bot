@@ -63,6 +63,12 @@ export function toConsole(report: PRReviewReport): string {
   // Overall Score & Verdict
   out += `  ${colors.bold}Verdict:${colors.reset}       ${getVerdictColor(report.verdict)}\n`;
   out += `  ${colors.bold}Health Score:${colors.reset}  ${report.healthScore}/100 (Grade: ${colors.bold}${report.grade}${colors.reset})\n`;
+  if (report.detectedLanguages && report.detectedLanguages.length > 0) {
+    out += `  ${colors.bold}Languages:${colors.reset}     ${report.detectedLanguages.join(', ')}\n`;
+  }
+  if (report.detectedFrameworks && report.detectedFrameworks.length > 0) {
+    out += `  ${colors.bold}Frameworks:${colors.reset}    ${colors.cyan}${report.detectedFrameworks.join(', ')}${colors.reset}\n`;
+  }
   out += `  ${colors.bold}Files Changed:${colors.reset} ${report.stats.filesChanged} (+${report.stats.additions} / -${report.stats.deletions})\n`;
   out += `  ${colors.bold}Defects:${colors.reset}        Crit: ${report.stats.criticalIssues} | High: ${report.stats.highIssues} | Med: ${report.stats.mediumIssues} | Low: ${report.stats.lowIssues}\n\n`;
 
@@ -144,6 +150,16 @@ export function toGitHubMarkdown(report: PRReviewReport): string {
   md += `| Health Score | Letter Grade | Review Verdict | Files Changed | Total Issues |\n`;
   md += `| :---: | :---: | :---: | :---: | :---: |\n`;
   md += `| **${report.healthScore}/100** | **${report.grade}** | ${verdictBadge} | ${report.stats.filesChanged} (+${report.stats.additions}/-${report.stats.deletions}) | **${report.findings.length}** |\n\n`;
+
+  // Tech Stack & Framework Callout
+  const hasLangs = report.detectedLanguages && report.detectedLanguages.length > 0;
+  const hasFws = report.detectedFrameworks && report.detectedFrameworks.length > 0;
+  if (hasLangs || hasFws) {
+    const parts: string[] = [];
+    if (hasLangs) parts.push(`**Languages:** ${report.detectedLanguages!.join(', ')}`);
+    if (hasFws) parts.push(`**Frameworks / Stacks:** \`${report.detectedFrameworks!.join('`, `')}\``);
+    md += `> 🛠️ **Environment:** ${parts.join(' | ')}\n\n`;
+  }
 
   // Issues Breakdown
   md += `### 📊 Defect Breakdown\n\n`;

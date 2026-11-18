@@ -75,8 +75,11 @@ program
       console.log(`📁 Analyzed diff: ${fileDiffs.length} file(s) changed.`);
 
       // 3. Build context
-      console.log('🧠 Building multi-file review context & applying 12-step principles...');
+      console.log('🧠 Building multi-file review context & detecting frameworks...');
       const context = buildReviewContext(config.targetProjectPath, fileDiffs);
+      if (context.detectedFrameworks.length > 0) {
+        console.log(`🎯 Detected Frameworks: ${context.detectedFrameworks.join(', ')}`);
+      }
 
       // 4. Perform AI Review Reasoning
       console.log('✨ Performing AI review analysis with Google Gemini...');

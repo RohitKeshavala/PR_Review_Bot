@@ -313,33 +313,46 @@ async function executeGeminiWithFallback(
  * Builds the AI system and user prompts incorporating review context
  */
 function buildPrompts(context: ReviewContext) {
+  const frameworksHeader =
+    context.detectedFrameworks.length > 0
+      ? `\nDetected Project Frameworks & Stacks: ${context.detectedFrameworks.join(', ')}.\n\nFramework-Specific Specialized Review Rules:\n${context.frameworkGuidelines}\n`
+      : `\nFull-Stack Review Rules:\n${context.frameworkGuidelines}\n`;
+
   const systemPrompt = `You are an elite autonomous polyglot Staff Principal Software Engineer and Security Architect conducting a comprehensive Pull Request Code Review.
 
-Detected Project Languages / Technologies: ${context.detectedLanguages.join(', ')}.
+Detected Project Languages / Technologies: ${context.detectedLanguages.join(', ')}.${frameworksHeader}
 
 Embedded 12-Step Universal Review Principles:
 ${context.principles}
 
 Rules for Review:
-1. NO SPECULATIVE / THEORETICAL ISSUES: Do NOT raise "what-if" issues, theoretical design preferences, or hypothetical future misuse scenarios (e.g., "if someone in the future uses this field for dynamic data"). Only report concrete, demonstrable bugs, fatal exceptions, or security vulnerabilities that exist in this exact code right now.
-2. HIGH CONFIDENCE THRESHOLD & EXHAUSTIVENESS REQUIREMENT:
-   - Only report an issue if you have >= 90% confidence that it is an actual defect or regression introduced by this PR.
-   - Review EVERY hunk of EVERY file in this request before answering.
-   - Report ALL concrete defects that meet the confidence bar in THIS single pass.
-   - Do NOT hold back findings for later reviews. Do NOT stop after a few findings.
+1. DISTINGUISH CONCRETE DEFECTS FROM SPECULATIVE OPINIONS:
+   - Do NOT raise purely speculative "what-if" future opinions, subjective naming debates, or aesthetic formatting preferences.
+   - MUST report real, concrete defects introduced in this PR: security vulnerabilities, broken object-level authorization (BOLA), broken state/reactivity tracking (e.g. in-place signal mutations), memory leaks (uncleared intervals/subscriptions), logic flaws, unhandled error conditions, and injection flaws.
+2. EXHAUSTIVE MULTI-TIER AUDIT:
+   - Review EVERY hunk of EVERY file in this diff. Do not stop after a few findings.
+   - Audit BOTH frontend components/templates and backend services/routes with equal rigor.
    - ONLY report issues on lines marked '+' (added/modified). Unchanged code is context only.
-   - lineNumber MUST be a line number shown in the diff for an added line.
-3. FOCUS ON BLOCKERS: Reserve CRITICAL and HIGH strictly for catastrophic defects (fatal runtime exceptions, authentication bypass, active injection, data loss, hardcoded secrets). Minor style suggestions, naming improvements, or non-fatal refactors must be LOW or INFORMATIONAL.
-4. For every finding:
+   - lineNumber MUST be an added line number shown in the diff.
+3. SEVERITY TIERS CALIBRATION:
+   - CRITICAL: Active security breaches (SQL injection, hardcoded secrets, unauthenticated remote execution) or fatal server-crashing defects.
+   - HIGH: Broken Object Level Authorization (BOLA/IDOR), Stored/Reflected XSS, privilege escalation, or major data loss.
+   - MEDIUM: Functional defects, broken framework reactivity (such as in-place Angular signal mutation bypassing change detection), resource leaks (uncleared intervals/timers/subscriptions), or unhandled edge cases.
+   - LOW: Minor boundary oversights, missing defensive defaults, or non-critical edge cases.
+   - INFORMATIONAL: Significant architectural or maintainability insights.
+   - CRITICAL NOTICE ON REACTIVE MUTATION: Do NOT dismiss reactive state mutation (e.g. \`this.signal().push(x); this.signal.set(...)\`) as a minor style choice; in reactive frameworks it halts UI synchronization and is a functional bug (MEDIUM or HIGH).
+4. HIGH CONFIDENCE BAR:
+   - Report issues when you have >= 85% confidence that the code introduces a real vulnerability, bug, or anti-pattern that impairs correctness, security, or stability.
+5. For every finding:
    - Identify the exact filePath (must match a file in the diff).
    - Identify the lineNumber in the NEW file where the defect or improvement occurs (MUST be a line number shown in the diff for an added line marked '+').
    - Assign severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFORMATIONAL'.
    - Assign category: 'Security' | 'Performance' | 'Correctness' | 'Error Handling' | 'API Design' | 'Maintainability' | 'Testing'.
-   - Detail the problem clearly.
-   - Explain why it matters (impact on reliability, security, scalability).
+   - Detail the problem clearly, referencing framework mechanics where applicable.
+   - Explain why it matters (impact on reliability, security, reactivity, memory).
    - Provide a concise recommendationDiff or suggested replacement code block.
-5. If the PR diff is completely clean, return an empty findings list [].
-6. CRITICAL JSON ENCODING REQUIREMENT:
+6. If the PR diff is completely clean, return an empty findings list [].
+7. CRITICAL JSON ENCODING REQUIREMENT:
    - Output must be strictly valid JSON.
    - Any double quotes inside JSON string values (especially HTML attributes in recommendationDiff like class="...", or string literals in code snippets) MUST be properly escaped as \\" or use single quotes '.
    - Never output raw unescaped double quotes inside a JSON string value.
@@ -415,8 +428,13 @@ function generateDryRunReview(context: ReviewContext): RawAIReviewResponse {
     });
   }
 
+  const frameworksSummary =
+    context.detectedFrameworks.length > 0
+      ? ` and frameworks (${context.detectedFrameworks.join(', ')})`
+      : '';
+
   return {
-    summary: `[DRY-RUN SIMULATION] Analyzed ${context.fileDiffs.length} modified file(s) across ${context.detectedLanguages.join(', ')}. Code structure validated against universal review principles.`,
+    summary: `[DRY-RUN SIMULATION] Analyzed ${context.fileDiffs.length} modified file(s) across ${context.detectedLanguages.join(', ')}${frameworksSummary}. Code structure validated against universal review principles and framework-specific guidelines.`,
     findings,
   };
 }
@@ -589,6 +607,8 @@ export async function performAIReview(
     summary: aiResponse.summary || 'Code review completed successfully.',
     stats: fullStats,
     findings: prioritizedFindings,
+    detectedLanguages: context.detectedLanguages,
+    detectedFrameworks: context.detectedFrameworks,
     targetPath: config.targetProjectPath,
     baseBranch: config.baseBranch,
     headBranch: config.headBranch,
