@@ -344,8 +344,7 @@ export function detectFrameworks(
     if (
       content.includes('@nestjs/common') ||
       content.includes('@nestjs/core') ||
-      content.includes('@Controller(') ||
-      content.includes('@Injectable(')
+      content.includes('@nestjs/')
     ) {
       detected.add('NestJS');
     }
