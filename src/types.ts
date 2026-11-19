@@ -47,6 +47,7 @@ export interface FileDiff {
 export interface PRFinding {
   filePath: string;
   lineNumber: number;
+  endLineNumber?: number;
   inDiffHunk: boolean;
   title: string;
   severity: Severity;
@@ -87,8 +88,10 @@ export interface PRReviewReport {
 export interface ReviewComment {
   path: string;
   line: number;
-  body: string;
+  start_line?: number;
+  start_side?: 'RIGHT' | 'LEFT';
   side?: 'RIGHT' | 'LEFT';
+  body: string;
 }
 
 export interface ReviewPayload {

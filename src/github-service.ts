@@ -82,12 +82,22 @@ export async function submitPullRequestReview(
   // Filter inline comments to only findings validated to be within diff hunks
   const inlineComments: ReviewComment[] = report.findings
     .filter((f) => f.inDiffHunk && f.lineNumber > 0)
-    .map((f) => ({
-      path: normalizePath(f.filePath),
-      line: f.lineNumber,
-      side: 'RIGHT' as const,
-      body: toInlineComment(f),
-    }));
+    .map((f) => {
+      const isMultiLine = Boolean(f.endLineNumber && f.endLineNumber > f.lineNumber);
+      const comment: ReviewComment = {
+        path: normalizePath(f.filePath),
+        line: isMultiLine ? f.endLineNumber! : f.lineNumber,
+        side: 'RIGHT' as const,
+        body: toInlineComment(f),
+      };
+
+      if (isMultiLine) {
+        comment.start_line = f.lineNumber;
+        comment.start_side = 'RIGHT' as const;
+      }
+
+      return comment;
+    });
 
   const payload: ReviewPayload = {
     owner,

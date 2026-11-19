@@ -296,6 +296,80 @@ export function isLineInDiffHunk(
 }
 
 /**
+ * Crucial safety check: Validates that a range of lines (startLine to endLine)
+ * exists entirely within a single diff hunk for the given file on the new file (RIGHT side),
+ * and that at least one of the lines in the range is an added line ('+').
+ * This ensures GitHub multi-line comments can be posted without 422 errors.
+ */
+export function isRangeInDiffHunk(
+  filePath: string,
+  startLine: number,
+  endLine: number,
+  fileDiffs: FileDiff[],
+): boolean {
+  if (!filePath || !startLine || !endLine || startLine <= 0 || endLine < startLine) {
+    return false;
+  }
+
+  // If single line, defer to isLineInDiffHunk
+  if (startLine === endLine) {
+    return isLineInDiffHunk(filePath, startLine, fileDiffs, true);
+  }
+
+  const normalizedTarget = normalizePath(filePath).toLowerCase();
+
+  const matchingDiff = fileDiffs.find((diff) => {
+    const diffNew = normalizePath(diff.newPath).toLowerCase();
+    const diffOld = diff.oldPath ? normalizePath(diff.oldPath).toLowerCase() : '';
+    return (
+      diffNew === normalizedTarget ||
+      diffOld === normalizedTarget ||
+      diffNew.endsWith(normalizedTarget) ||
+      normalizedTarget.endsWith(diffNew)
+    );
+  });
+
+  if (!matchingDiff) {
+    return false;
+  }
+
+  // Both startLine and endLine MUST exist in the SAME hunk in the new file (RIGHT side)
+  for (const hunk of matchingDiff.hunks) {
+    const hunkNewLines = new Set<number>();
+    let hasAddedLine = false;
+
+    for (const line of hunk.lines) {
+      if (line.newLineNumber !== undefined) {
+        hunkNewLines.add(line.newLineNumber);
+        if (
+          line.newLineNumber >= startLine &&
+          line.newLineNumber <= endLine &&
+          line.type === 'add'
+        ) {
+          hasAddedLine = true;
+        }
+      }
+    }
+
+    if (hunkNewLines.has(startLine) && hunkNewLines.has(endLine) && hasAddedLine) {
+      // Ensure all lines between startLine and endLine exist contiguously in this hunk
+      let allContiguous = true;
+      for (let l = startLine; l <= endLine; l++) {
+        if (!hunkNewLines.has(l)) {
+          allContiguous = false;
+          break;
+        }
+      }
+      if (allContiguous) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
  * Returns line content from diff for a given file and line number
  */
 export function getDiffLineContent(

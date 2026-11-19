@@ -82,8 +82,12 @@ export function toConsole(report: PRReviewReport): string {
     out += `  ${colors.bold}Itemized Review Findings (${report.findings.length}):${colors.reset}\n\n`;
 
     report.findings.forEach((f, idx) => {
+      const lineRange =
+        f.endLineNumber && f.endLineNumber > f.lineNumber
+          ? `${f.filePath}:${f.lineNumber}-${f.endLineNumber}`
+          : `${f.filePath}:${f.lineNumber}`;
       out += `  ${idx + 1}. [${getSeverityColor(f.severity)}] [${f.category}] ${colors.bold}${f.title}${colors.reset}\n`;
-      out += `     Location: ${f.filePath}:${f.lineNumber} ${f.inDiffHunk ? `${colors.green}(In Diff Hunk)${colors.reset}` : `${colors.dim}(Outside Diff Hunk)${colors.reset}`}\n`;
+      out += `     Location: ${lineRange} ${f.inDiffHunk ? `${colors.green}(In Diff Hunk)${colors.reset}` : `${colors.dim}(Outside Diff Hunk)${colors.reset}`}\n`;
       out += `     Problem:  ${f.problem}\n`;
       out += `     Impact:   ${f.whyItMatters}\n`;
       if (f.recommendationDiff) {
@@ -97,6 +101,55 @@ export function toConsole(report: PRReviewReport): string {
 
   out += doubleHr + '\n';
   return out;
+}
+
+/**
+ * Cleans recommendation code to ensure it works reliably as a GitHub 1-click suggestion.
+ * - Strips outer markdown code fences (```suggestion, ```typescript, etc.)
+ * - Identifies and safely handles unified diff notations
+ * - Strips diff prefixes ('+', context lines) while preserving exact target indentation
+ */
+export function cleanSuggestionCode(raw: string): { code: string; isRawDiff: boolean } {
+  if (!raw) return { code: '', isRawDiff: false };
+
+  // Strip leading and trailing newlines, but preserve indentation on lines
+  let text = raw.replace(/^[\r\n]+/, '').replace(/[\r\n\s]+$/, '');
+
+  // Strip outer markdown code blocks if the AI model included them
+  if (text.startsWith('```')) {
+    text = text.replace(/^```[^\r\n]*\r?\n/, '').replace(/\r?\n```[^\r\n]*$/, '');
+  }
+
+  // Count hunk headers (@@ -... @@)
+  const hunkHeaders = text.match(/^@@\s+-\d+/gm) || [];
+  if (hunkHeaders.length > 1) {
+    // Contains multiple disjoint diff hunks: unsafe for a single GitHub suggestion block
+    return { code: text, isRawDiff: true };
+  }
+
+  if (hunkHeaders.length === 1) {
+    text = text.replace(/^@@.*?@@\r?\n?/m, '');
+  }
+
+  const lines = text.split(/\r?\n/);
+  const hasMinus = lines.some((l) => l.startsWith('-'));
+  const hasPlus = lines.some((l) => l.startsWith('+'));
+
+  if (hasMinus || hasPlus) {
+    // If unified diff notation was used, extract the '+' replacement lines
+    const replacementLines: string[] = [];
+    for (const line of lines) {
+      if (line.startsWith('+')) {
+        replacementLines.push(line.replace(/^\+\s?/, ''));
+      } else if (!line.startsWith('-')) {
+        // Context line (strip leading space if standard diff format)
+        replacementLines.push(line.startsWith(' ') ? line.substring(1) : line);
+      }
+    }
+    return { code: replacementLines.join('\n'), isRawDiff: false };
+  }
+
+  return { code: text, isRawDiff: false };
 }
 
 /**
@@ -116,16 +169,13 @@ export function toInlineComment(finding: PRFinding): string {
   body += `**Problem:**\n${finding.problem}\n\n`;
   body += `**Why It Matters:**\n${finding.whyItMatters}\n\n`;
 
-  if (finding.recommendationDiff && finding.recommendationDiff.trim().length > 0) {
-    const rec = finding.recommendationDiff.trim();
-    // If already wrapped in markdown code blocks, strip them
-    if (rec.startsWith('```suggestion')) {
-      body += `**Suggested Fix:**\n${rec}\n`;
-    } else if (rec.startsWith('```')) {
-      const inner = rec.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/, '');
-      body += `**Suggested Fix:**\n\`\`\`suggestion\n${inner}\n\`\`\`\n`;
+  if (finding.recommendationDiff !== undefined && finding.recommendationDiff.trim().length > 0) {
+    const { code, isRawDiff } = cleanSuggestionCode(finding.recommendationDiff);
+
+    if (isRawDiff) {
+      body += `**Suggested Fix (Unified Diff Reference):**\n\`\`\`diff\n${code}\n\`\`\`\n*(Note: This recommendation includes unified diff notation spanning multiple disjoint sections. Please apply manually.)*\n`;
     } else {
-      body += `**Suggested Fix:**\n\`\`\`suggestion\n${rec}\n\`\`\`\n`;
+      body += `**Suggested Fix:**\n\`\`\`suggestion\n${code}\n\`\`\`\n`;
     }
   }
 
@@ -179,19 +229,32 @@ export function toGitHubMarkdown(report: PRReviewReport): string {
 
     report.findings.forEach((f, idx) => {
       const inlineStatus = f.inDiffHunk ? '✅ Attached' : 'ℹ️ Top-level';
-      md += `| ${idx + 1} | \`${f.severity}\` | ${f.category} | \`${f.filePath}:${f.lineNumber}\` | ${f.title} | ${inlineStatus} |\n`;
+      const lineRange =
+        f.endLineNumber && f.endLineNumber > f.lineNumber
+          ? `${f.filePath}:${f.lineNumber}-${f.endLineNumber}`
+          : `${f.filePath}:${f.lineNumber}`;
+      md += `| ${idx + 1} | \`${f.severity}\` | ${f.category} | \`${lineRange}\` | ${f.title} | ${inlineStatus} |\n`;
     });
     md += `\n`;
 
     md += `### 📋 Itemized Defect Details\n\n`;
     report.findings.forEach((f, idx) => {
+      const lineRange =
+        f.endLineNumber && f.endLineNumber > f.lineNumber
+          ? `${f.filePath}:${f.lineNumber}-${f.endLineNumber}`
+          : `${f.filePath}:${f.lineNumber}`;
       md += `<details open>\n`;
-      md += `<summary><b>#${idx + 1} [${f.severity}] ${f.title}</b> — <code>${f.filePath}:${f.lineNumber}</code></summary>\n\n`;
+      md += `<summary><b>#${idx + 1} [${f.severity}] ${f.title}</b> — <code>${lineRange}</code></summary>\n\n`;
       md += `- **Category:** \`${f.category}\`\n`;
       md += `- **Problem:** ${f.problem}\n`;
       md += `- **Why It Matters:** ${f.whyItMatters}\n`;
-      if (f.recommendationDiff) {
-        md += `- **Suggested Fix:**\n\n\`\`\`suggestion\n${f.recommendationDiff}\n\`\`\`\n`;
+      if (f.recommendationDiff && f.recommendationDiff.trim().length > 0) {
+        const { code, isRawDiff } = cleanSuggestionCode(f.recommendationDiff);
+        if (isRawDiff) {
+          md += `- **Suggested Fix (Unified Diff Reference):**\n\n\`\`\`diff\n${code}\n\`\`\`\n`;
+        } else {
+          md += `- **Suggested Fix:**\n\n\`\`\`suggestion\n${code}\n\`\`\`\n`;
+        }
       }
       md += `</details>\n\n`;
     });

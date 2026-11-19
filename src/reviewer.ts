@@ -1,6 +1,6 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import type { ReviewContext } from './context-builder.js';
-import { isLineInDiffHunk } from './git-service.js';
+import { isLineInDiffHunk, isRangeInDiffHunk } from './git-service.js';
 import type {
   AppConfig,
   FindingCategory,
@@ -15,6 +15,7 @@ import type {
 interface RawAIFinding {
   filePath: string;
   lineNumber: number;
+  endLineNumber?: number;
   title: string;
   severity: Severity;
   category: FindingCategory;
@@ -45,7 +46,14 @@ const REVIEW_RESPONSE_SCHEMA = {
         type: Type.OBJECT,
         properties: {
           filePath: { type: Type.STRING, description: 'File path matching a file in the diff.' },
-          lineNumber: { type: Type.INTEGER, description: 'Line number in the new file on an added line.' },
+          lineNumber: {
+            type: Type.INTEGER,
+            description: 'Start line number in the new file on an added/modified line in the diff hunk.',
+          },
+          endLineNumber: {
+            type: Type.INTEGER,
+            description: 'End line number in the new file for multi-line replacement (inclusive). Must be in the same diff hunk as lineNumber. Set equal to lineNumber for single-line changes.',
+          },
           title: { type: Type.STRING, description: 'Short descriptive title of defect.' },
           severity: {
             type: Type.STRING,
@@ -65,7 +73,10 @@ const REVIEW_RESPONSE_SCHEMA = {
           },
           problem: { type: Type.STRING, description: 'Clear explanation of the bug or architectural defect.' },
           whyItMatters: { type: Type.STRING, description: 'Impact explanation.' },
-          recommendationDiff: { type: Type.STRING, description: 'Suggested replacement code or fix.' },
+          recommendationDiff: {
+            type: Type.STRING,
+            description: 'Exact clean replacement code for GitHub 1-click suggestion. Do NOT include diff headers (@@), +/- diff prefixes, or markdown fences. Preserves exact indentation so it directly overwrites lines lineNumber through endLineNumber.',
+          },
         },
         required: [
           'filePath',
@@ -343,16 +354,23 @@ Rules for Review:
    - CRITICAL NOTICE ON REACTIVE MUTATION: Do NOT dismiss in-place mutation of reactive state or signals as a minor style choice; in reactive frameworks it breaks referential equality tracking (Object.is), halts UI synchronization, and is a functional bug (MEDIUM or HIGH).
 4. HIGH CONFIDENCE BAR:
    - Report issues when you have >= 85% confidence that the code introduces a real vulnerability, bug, or anti-pattern that impairs correctness, security, or stability.
-5. For every finding:
-   - Identify the exact filePath (must match a file in the diff).
-   - Identify the lineNumber in the NEW file where the defect or improvement occurs (MUST be a line number shown in the diff for an added line marked '+').
-   - Assign severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFORMATIONAL'.
-   - Assign category: 'Security' | 'Performance' | 'Correctness' | 'Error Handling' | 'API Design' | 'Maintainability' | 'Testing'.
-   - Detail the problem clearly, referencing framework mechanics where applicable.
-   - Explain why it matters (impact on reliability, security, reactivity, memory).
-   - Provide a concise recommendationDiff or suggested replacement code block.
-6. If the PR diff is completely clean, return an empty findings list [].
-7. CRITICAL JSON ENCODING REQUIREMENT:
+5. PRECISE MULTI-LINE RANGE TARGETING:
+   - lineNumber: The START line number in the NEW file where the defect or replacement begins (MUST be an added/modified line in the diff hunk).
+   - endLineNumber: The END line number in the NEW file where the replacement block ends (inclusive).
+     * If the issue/replacement is on a single line, endLineNumber MUST equal lineNumber.
+     * If the issue/replacement replaces multiple lines (e.g., lines 26 through 28), set endLineNumber to the last line of that block (e.g., 28).
+     * CRITICAL: Both lineNumber and endLineNumber MUST be within the SAME contiguous diff hunk. Never span across different hunks or files.
+     * ISOLATE DISCONNECTED DEFECTS: If a PR has issues in multiple separate locations (e.g., line 26 AND line 61), report them as SEPARATE findings, one for each location. NEVER combine separate locations into one finding.
+6. CLEAN REPLACEMENT CODE FOR GITHUB 1-CLICK SUGGESTIONS (recommendationDiff):
+   - In GitHub PR reviews, recommendationDiff is placed directly inside a \`\`\`suggestion\`\`\` block. Clicking "Commit suggestion" will REWRITE lines lineNumber through endLineNumber with the exact content of recommendationDiff.
+   - MUST BE PURE, CLEAN REPLACEMENT CODE:
+     * NEVER output Git diff notation: NO "@@ ... @@" headers, NO leading "+" or "-" signs.
+     * NEVER include unchanged context lines from outside the lineNumber..endLineNumber range (doing so creates DUPLICATE lines when applied!).
+     * NEVER wrap recommendationDiff in markdown code fences (no \`\`\`suggestion or \`\`\`ts).
+     * MUST preserve exact indentation (spaces or tabs) matching the target file so the replacement fits seamlessly.
+     * To delete lines lineNumber through endLineNumber without replacement, provide an empty string "".
+7. If the PR diff is completely clean, return an empty findings list [].
+8. CRITICAL JSON ENCODING REQUIREMENT:
    - Output must be strictly valid JSON.
    - Any double quotes inside JSON string values (especially HTML attributes in recommendationDiff like class="...", or string literals in code snippets) MUST be properly escaped as \\" or use single quotes '.
    - Never output raw unescaped double quotes inside a JSON string value.
@@ -363,13 +381,14 @@ Output strictly valid JSON with this exact schema:
   "findings": [
     {
       "filePath": "string",
-      "lineNumber": 123,
+      "lineNumber": 26,
+      "endLineNumber": 28,
       "title": "Short descriptive title of defect",
       "severity": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFORMATIONAL",
       "category": "Security" | "Performance" | "Correctness" | "Error Handling" | "API Design" | "Maintainability" | "Testing",
       "problem": "Clear explanation of the bug or architectural defect.",
       "whyItMatters": "Impact explanation.",
-      "recommendationDiff": "Suggested code replacement or fix"
+      "recommendationDiff": "        u.role AS authorRole"
     }
   ]
 }`;
@@ -419,6 +438,7 @@ function generateDryRunReview(context: ReviewContext): RawAIReviewResponse {
     findings.push({
       filePath: firstDiff.newPath,
       lineNumber: targetLine,
+      endLineNumber: targetLine,
       title: 'Dry-Run Simulation: Validated Diff Structure & Polyglot Engine',
       severity: 'INFORMATIONAL',
       category: 'Maintainability',
@@ -559,10 +579,22 @@ export async function performAIReview(
 
   // Validate diff hunk boundaries for each finding
   const validatedFindings: PRFinding[] = (aiResponse.findings || []).map((f) => {
-    const inHunk = isLineInDiffHunk(f.filePath, f.lineNumber, context.fileDiffs, true);
+    const startLine = Number(f.lineNumber);
+    const parsedEnd = f.endLineNumber !== undefined ? Number(f.endLineNumber) : startLine;
+    const requestedEndLine = parsedEnd >= startLine ? parsedEnd : startLine;
+
+    // Check if multi-line range is valid within a single diff hunk
+    const isMultiLineValid =
+      requestedEndLine > startLine &&
+      isRangeInDiffHunk(f.filePath, startLine, requestedEndLine, context.fileDiffs);
+
+    const singleLineInHunk = isLineInDiffHunk(f.filePath, startLine, context.fileDiffs, true);
+    const inHunk = isMultiLineValid || singleLineInHunk;
+
     return {
       filePath: f.filePath,
-      lineNumber: f.lineNumber,
+      lineNumber: startLine,
+      endLineNumber: isMultiLineValid ? requestedEndLine : undefined,
       inDiffHunk: inHunk,
       title: f.title || 'Review Finding',
       severity: f.severity || 'MEDIUM',
