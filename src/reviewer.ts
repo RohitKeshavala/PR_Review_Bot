@@ -369,6 +369,15 @@ Rules for Review:
      * NEVER wrap recommendationDiff in markdown code fences (no \`\`\`suggestion or \`\`\`ts).
      * MUST preserve exact indentation (spaces or tabs) matching the target file so the replacement fits seamlessly.
      * To delete lines lineNumber through endLineNumber without replacement, provide an empty string "".
+   - STRICT LEXICAL SCOPE INTEGRITY (AVOID NESTED DECLARATIONS):
+     * The replacement code MUST be 100% syntactically valid in the EXACT lexical scope of lineNumber..endLineNumber.
+     * If lineNumber..endLineNumber is inside a method or function body (e.g. inside ngOnInit, a constructor, a route handler, or a helper function):
+       - NEVER include class-level member declarations (e.g., 'private myListener = ...').
+       - NEVER declare new methods or lifecycle hooks (e.g., 'ngOnInit(): void', 'ngOnDestroy(): void').
+       - Pasting class properties or methods inside an existing method body causes fatal compiler errors (TS1068, TS2393).
+     * If a fix requires multi-scope refactoring (e.g., modifying class properties, constructor, AND a separate lifecycle method like ngOnDestroy):
+       - EITHER provide an in-scope self-contained solution (e.g., in Angular using 'fromEvent(window, "keydown").pipe(takeUntilDestroyed(this.destroyRef)).subscribe(...)', or in standard JS using an AbortController),
+       - OR OMIT recommendationDiff entirely and explain the required multi-file/multi-method refactoring steps in the problem and whyItMatters text!
 7. If the PR diff is completely clean, return an empty findings list [].
 8. CRITICAL JSON ENCODING REQUIREMENT:
    - Output must be strictly valid JSON.

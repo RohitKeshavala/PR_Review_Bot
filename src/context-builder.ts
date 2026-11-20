@@ -385,6 +385,10 @@ export function getFrameworkGuidelines(frameworks: string[]): string {
 2. Component Lifecycle & Resource Cleanup:
    - Intervals (setInterval), timeouts (setTimeout), and manual RxJS subscriptions in components or services MUST be cleared when destroyed (ngOnDestroy with clearInterval, takeUntilDestroyed(), takeUntil(), or AsyncPipe).
    - Flag uncleared polling timers or unmanaged subscriptions as MEDIUM Memory Leak / Resource defects.
+   - For window/document event listeners:
+     * To fix inside ngOnInit(): Use RxJS 'fromEvent(window, "keydown").pipe(takeUntilDestroyed(this.destroyRef)).subscribe(...)' which cleans up automatically and requires NO class properties or ngOnDestroy!
+     * Or recommend Angular's '@HostListener("window:keydown.escape") handleEscape() { ... }' at class scope.
+     * CRITICAL: NEVER suggest declaring class properties ('private keydownListener') or new lifecycle methods ('ngOnInit', 'ngOnDestroy') inside a method body replacement block!
 3. Template Security:
    - Untrusted or user-supplied content MUST NOT be bound via [innerHTML]="..." due to Stored/Reflected XSS risks. Require safe text interpolation {{ ... }} or explicit sanitization via DomSanitizer.
 4. Change Detection:

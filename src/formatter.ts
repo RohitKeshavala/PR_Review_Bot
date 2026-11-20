@@ -103,14 +103,43 @@ export function toConsole(report: PRReviewReport): string {
   return out;
 }
 
+export interface CleanedSuggestion {
+  code: string;
+  isRawDiff: boolean;
+  isScopeViolation: boolean;
+}
+
+/**
+ * Detects if a code suggestion contains class-level members (e.g. private properties,
+ * class lifecycle hooks like ngOnInit/ngOnDestroy, or decorators) that would cause
+ * syntax errors (e.g. TS1068, TS2393) if applied inline inside a function or method body.
+ */
+function checkScopeViolation(text: string): boolean {
+  // 1. Access modifiers on variables/properties (invalid inside function bodies)
+  const hasAccessModifiers = /(?:^|\n)\s*(?:private|protected)\s+[a-zA-Z0-9_$]+\s*[:=]/m.test(text);
+
+  // 2. Class decorators like @HostListener or @Input (invalid inside function bodies)
+  const hasClassDecorators = /(?:^|\n)\s*@(HostListener|Component|Injectable|Directive|Input|Output)\s*\(/m.test(text);
+
+  // 3. Multi-method or duplicate lifecycle declarations (e.g., ngOnInit() and ngOnDestroy() declared together)
+  const hasLifecycleDeclarations =
+    /(?:^|\n)\s*(?:public|private|protected)?\s*(?:ngOnInit|ngOnDestroy|componentDidMount|componentWillUnmount)\s*\([^)]*\)\s*(?::\s*[a-zA-Z0-9_$<>[\]]+)?\s*\{/m.test(text);
+
+  const hasMultipleMethods =
+    /\bngOnInit\s*\([^)]*\)[\s\S]*\bngOnDestroy\s*\(/m.test(text);
+
+  return hasAccessModifiers || hasClassDecorators || (hasLifecycleDeclarations && hasMultipleMethods);
+}
+
 /**
  * Cleans recommendation code to ensure it works reliably as a GitHub 1-click suggestion.
  * - Strips outer markdown code fences (```suggestion, ```typescript, etc.)
  * - Identifies and safely handles unified diff notations
  * - Strips diff prefixes ('+', context lines) while preserving exact target indentation
+ * - Detects class-level scope violations that cannot be safely applied inline
  */
-export function cleanSuggestionCode(raw: string): { code: string; isRawDiff: boolean } {
-  if (!raw) return { code: '', isRawDiff: false };
+export function cleanSuggestionCode(raw: string): CleanedSuggestion {
+  if (!raw) return { code: '', isRawDiff: false, isScopeViolation: false };
 
   // Strip leading and trailing newlines, but preserve indentation on lines
   let text = raw.replace(/^[\r\n]+/, '').replace(/[\r\n\s]+$/, '');
@@ -124,7 +153,7 @@ export function cleanSuggestionCode(raw: string): { code: string; isRawDiff: boo
   const hunkHeaders = text.match(/^@@\s+-\d+/gm) || [];
   if (hunkHeaders.length > 1) {
     // Contains multiple disjoint diff hunks: unsafe for a single GitHub suggestion block
-    return { code: text, isRawDiff: true };
+    return { code: text, isRawDiff: true, isScopeViolation: false };
   }
 
   if (hunkHeaders.length === 1) {
@@ -146,10 +175,19 @@ export function cleanSuggestionCode(raw: string): { code: string; isRawDiff: boo
         replacementLines.push(line.startsWith(' ') ? line.substring(1) : line);
       }
     }
-    return { code: replacementLines.join('\n'), isRawDiff: false };
+    const cleanCode = replacementLines.join('\n');
+    return {
+      code: cleanCode,
+      isRawDiff: false,
+      isScopeViolation: checkScopeViolation(cleanCode),
+    };
   }
 
-  return { code: text, isRawDiff: false };
+  return {
+    code: text,
+    isRawDiff: false,
+    isScopeViolation: checkScopeViolation(text),
+  };
 }
 
 /**
@@ -170,9 +208,11 @@ export function toInlineComment(finding: PRFinding): string {
   body += `**Why It Matters:**\n${finding.whyItMatters}\n\n`;
 
   if (finding.recommendationDiff !== undefined && finding.recommendationDiff.trim().length > 0) {
-    const { code, isRawDiff } = cleanSuggestionCode(finding.recommendationDiff);
+    const { code, isRawDiff, isScopeViolation } = cleanSuggestionCode(finding.recommendationDiff);
 
-    if (isRawDiff) {
+    if (isScopeViolation) {
+      body += `**Suggested Refactoring (Multi-Scope / Class Level):**\n\`\`\`typescript\n${code}\n\`\`\`\n*(Note: This fix involves class properties or lifecycle hooks. Please apply these changes at the class level rather than replacing inline lines directly.)*\n`;
+    } else if (isRawDiff) {
       body += `**Suggested Fix (Unified Diff Reference):**\n\`\`\`diff\n${code}\n\`\`\`\n*(Note: This recommendation includes unified diff notation spanning multiple disjoint sections. Please apply manually.)*\n`;
     } else {
       body += `**Suggested Fix:**\n\`\`\`suggestion\n${code}\n\`\`\`\n`;
@@ -249,8 +289,10 @@ export function toGitHubMarkdown(report: PRReviewReport): string {
       md += `- **Problem:** ${f.problem}\n`;
       md += `- **Why It Matters:** ${f.whyItMatters}\n`;
       if (f.recommendationDiff && f.recommendationDiff.trim().length > 0) {
-        const { code, isRawDiff } = cleanSuggestionCode(f.recommendationDiff);
-        if (isRawDiff) {
+        const { code, isRawDiff, isScopeViolation } = cleanSuggestionCode(f.recommendationDiff);
+        if (isScopeViolation) {
+          md += `- **Suggested Refactoring (Multi-Scope / Class Level):**\n\n\`\`\`typescript\n${code}\n\`\`\`\n`;
+        } else if (isRawDiff) {
           md += `- **Suggested Fix (Unified Diff Reference):**\n\n\`\`\`diff\n${code}\n\`\`\`\n`;
         } else {
           md += `- **Suggested Fix:**\n\n\`\`\`suggestion\n${code}\n\`\`\`\n`;
