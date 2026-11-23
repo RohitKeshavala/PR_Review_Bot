@@ -7,12 +7,14 @@ import type {
   PRFinding,
   PRReviewReport,
   PRReviewStats,
+  ResolvedFinding,
   ReviewGrade,
   ReviewVerdict,
   Severity,
 } from './types.js';
 
 interface RawAIFinding {
+  id?: string;
   filePath: string;
   lineNumber: number;
   endLineNumber?: number;
@@ -24,8 +26,14 @@ interface RawAIFinding {
   recommendationDiff?: string;
 }
 
+interface RawResolvedDefect {
+  id: string;
+  explanation: string;
+}
+
 interface RawAIReviewResponse {
   summary: string;
+  resolvedDefectIds?: RawResolvedDefect[];
   findings: RawAIFinding[];
 }
 
@@ -39,12 +47,34 @@ const REVIEW_RESPONSE_SCHEMA = {
       type: Type.STRING,
       description: 'Comprehensive 2-4 sentence executive summary of changes and overall review assessment.',
     },
-    findings: {
+    resolvedDefectIds: {
       type: Type.ARRAY,
-      description: 'List of all concrete, actionable defects identified in added or modified code.',
+      description: 'List of previous defect IDs verified to be properly and securely resolved in this code change.',
       items: {
         type: Type.OBJECT,
         properties: {
+          id: {
+            type: Type.STRING,
+            description: 'The defect ID from PREVIOUS ACTIVE DEFECTS (e.g. defect-1).',
+          },
+          explanation: {
+            type: Type.STRING,
+            description: 'Clear 1-sentence explanation of how the defect was resolved.',
+          },
+        },
+        required: ['id', 'explanation'],
+      },
+    },
+    findings: {
+      type: Type.ARRAY,
+      description: 'List of all concrete, actionable defects identified in added or modified code (both remaining unresolved defects and brand-new defects).',
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          id: {
+            type: Type.STRING,
+            description: 'The defect ID if matching a previous active defect, or a new unique ID if brand new.',
+          },
           filePath: { type: Type.STRING, description: 'File path matching a file in the diff.' },
           lineNumber: {
             type: Type.INTEGER,
@@ -321,13 +351,23 @@ async function executeGeminiWithFallback(
 }
 
 /**
- * Builds the AI system and user prompts incorporating review context
+ * Builds the AI system and user prompts incorporating review context and previous active defects
  */
-function buildPrompts(context: ReviewContext) {
+function buildPrompts(context: ReviewContext, previousActiveFindings: PRFinding[] = []) {
   const frameworksHeader =
     context.detectedFrameworks.length > 0
       ? `\nDetected Project Frameworks & Stacks: ${context.detectedFrameworks.join(', ')}.\n\nFramework-Specific Specialized Review Rules:\n${context.frameworkGuidelines}\n`
       : `\nFull-Stack Review Rules:\n${context.frameworkGuidelines}\n`;
+
+  let defectVerificationRule = '';
+  if (previousActiveFindings.length > 0) {
+    defectVerificationRule = `\n9. TARGETED DEFECT VERIFICATION:
+   - 'PREVIOUS ACTIVE DEFECTS REQUIRING VERIFICATION' are listed in the user prompt with tracking IDs.
+   - For each defect:
+     * If the developer's new code securely, properly, and completely fixes it: Include its ID in 'resolvedDefectIds' with a clear 1-sentence 'explanation' of how it was resolved.
+     * If the defect STILL PERSISTS (even if partially edited or lines shifted): Include it in 'findings' with its original 'id'.
+   - Also audit for any BRAND-NEW defects introduced in this PR and report them in 'findings'.\n`;
+  }
 
   const systemPrompt = `You are an elite autonomous polyglot Staff Principal Software Engineer and Security Architect conducting a comprehensive Pull Request Code Review.
 
@@ -382,25 +422,8 @@ Rules for Review:
 8. CRITICAL JSON ENCODING REQUIREMENT:
    - Output must be strictly valid JSON.
    - Any double quotes inside JSON string values (especially HTML attributes in recommendationDiff like class="...", or string literals in code snippets) MUST be properly escaped as \\" or use single quotes '.
-   - Never output raw unescaped double quotes inside a JSON string value.
-
-Output strictly valid JSON with this exact schema:
-{
-  "summary": "Comprehensive 2-4 sentence executive summary of changes and overall review assessment.",
-  "findings": [
-    {
-      "filePath": "string",
-      "lineNumber": 26,
-      "endLineNumber": 28,
-      "title": "Short descriptive title of defect",
-      "severity": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFORMATIONAL",
-      "category": "Security" | "Performance" | "Correctness" | "Error Handling" | "API Design" | "Maintainability" | "Testing",
-      "problem": "Clear explanation of the bug or architectural defect.",
-      "whyItMatters": "Impact explanation.",
-      "recommendationDiff": "        u.role AS authorRole"
-    }
-  ]
-}`;
+   - Never output raw unescaped double quotes inside a JSON string value.${defectVerificationRule}
+Output strictly valid JSON conforming to the schema.`;
 
   let fileContentsSection = '';
   for (const [filePath, content] of Object.entries(context.fileContents)) {
@@ -421,8 +444,24 @@ Output strictly valid JSON with this exact schema:
     })
     .join('\n');
 
-  const userPrompt = `Please review this Pull Request:
+  let previousDefectsSection = '';
+  if (previousActiveFindings.length > 0) {
+    previousDefectsSection = `\nPREVIOUS ACTIVE DEFECTS REQUIRING VERIFICATION:\nThe following defects were reported in a previous review on this PR and must be verified against the latest diff:\n`;
+    previousActiveFindings.forEach((d, idx) => {
+      const defId = d.id || `defect-${idx + 1}`;
+      previousDefectsSection += `\n- [ID: ${defId}] File: ${d.filePath}:${d.lineNumber} | Severity: ${d.severity} | Category: ${d.category}
+  Title: ${d.title}
+  Problem: ${d.problem}\n`;
+    });
+    previousDefectsSection += `\nVerification Instructions:
+1. For each previous defect above:
+   - If the code has been updated to securely and correctly resolve the defect: Return its ID in 'resolvedDefectIds' with a clear 1-sentence 'explanation'.
+   - If the defect STILL PERSISTS: Include it in 'findings' with its original 'id' ('${previousActiveFindings[0]?.id || 'defect-1'}', etc.).
+2. Report any BRAND-NEW defects found in the diff in 'findings'.\n`;
+  }
 
+  const userPrompt = `Please review this Pull Request:
+${previousDefectsSection}
 PULL REQUEST UNIFIED DIFF:
 ${rawDiff || 'No changes detected in diff.'}
 
@@ -562,6 +601,8 @@ export function calculateScoreAndVerdict(findings: PRFinding[]): {
 export async function performAIReview(
   context: ReviewContext,
   config: AppConfig,
+  previousActiveFindings: PRFinding[] = [],
+  previouslyResolved: ResolvedFinding[] = [],
 ): Promise<PRReviewReport> {
   let aiResponse: RawAIReviewResponse;
 
@@ -577,7 +618,7 @@ export async function performAIReview(
       throw new Error('GEMINI_API_KEY is required to perform AI review.');
     }
 
-    const { systemPrompt, userPrompt } = buildPrompts(context);
+    const { systemPrompt, userPrompt } = buildPrompts(context, previousActiveFindings);
     const { parsed } = await executeGeminiWithFallback(
       config,
       systemPrompt,
@@ -587,7 +628,7 @@ export async function performAIReview(
   }
 
   // Validate diff hunk boundaries for each finding
-  const validatedFindings: PRFinding[] = (aiResponse.findings || []).map((f) => {
+  const validatedFindings: PRFinding[] = (aiResponse.findings || []).map((f, idx) => {
     const startLine = Number(f.lineNumber);
     const parsedEnd = f.endLineNumber !== undefined ? Number(f.endLineNumber) : startLine;
     const requestedEndLine = parsedEnd >= startLine ? parsedEnd : startLine;
@@ -601,6 +642,7 @@ export async function performAIReview(
     const inHunk = isMultiLineValid || singleLineInHunk;
 
     return {
+      id: f.id || `defect-${idx + 1}`,
       filePath: f.filePath,
       lineNumber: startLine,
       endLineNumber: isMultiLineValid ? requestedEndLine : undefined,
@@ -613,6 +655,71 @@ export async function performAIReview(
       recommendationDiff: f.recommendationDiff,
     };
   });
+
+  // Reconcile resolved defects:
+  // Combine already-resolved defects (from prior reviews) with newly verified resolved defects
+  const resolvedMap = new Map<string, ResolvedFinding>();
+
+  // 1. Carry forward previously resolved defects (unless re-introduced in current code)
+  for (const prevRes of previouslyResolved) {
+    const isReIntroduced = validatedFindings.some(
+      (vf) =>
+        (prevRes.id && vf.id === prevRes.id) ||
+        (vf.filePath === prevRes.filePath &&
+          vf.title.toLowerCase().replace(/[^a-z0-9]/g, '') ===
+            prevRes.title.toLowerCase().replace(/[^a-z0-9]/g, '')),
+    );
+    if (!isReIntroduced) {
+      resolvedMap.set(prevRes.id || `${prevRes.filePath}::${prevRes.title}`, prevRes);
+    }
+  }
+
+  // 2. Add defects confirmed resolved by Gemini in this review round
+  const aiResolvedList = aiResponse.resolvedDefectIds || [];
+  for (const aiRes of aiResolvedList) {
+    const matchingPrev = previousActiveFindings.find((p) => p.id === aiRes.id);
+    if (matchingPrev) {
+      resolvedMap.set(aiRes.id, {
+        id: aiRes.id,
+        filePath: matchingPrev.filePath,
+        lineNumber: matchingPrev.lineNumber,
+        endLineNumber: matchingPrev.endLineNumber,
+        title: matchingPrev.title,
+        severity: matchingPrev.severity,
+        category: matchingPrev.category,
+        explanation: aiRes.explanation,
+        resolvedAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  // 3. Deterministic safety check: if a previous defect is no longer detected in findings
+  // and not yet in resolvedMap, mark it resolved
+  for (const prev of previousActiveFindings) {
+    const prevKey = prev.id || `${prev.filePath}::${prev.title}`;
+    const stillActive = validatedFindings.some(
+      (vf) =>
+        (prev.id && vf.id === prev.id) ||
+        (vf.filePath === prev.filePath &&
+          vf.title.toLowerCase().replace(/[^a-z0-9]/g, '') ===
+            prev.title.toLowerCase().replace(/[^a-z0-9]/g, '')),
+    );
+    if (!stillActive && !resolvedMap.has(prevKey)) {
+      resolvedMap.set(prevKey, {
+        id: prev.id,
+        filePath: prev.filePath,
+        lineNumber: prev.lineNumber,
+        endLineNumber: prev.endLineNumber,
+        title: prev.title,
+        severity: prev.severity,
+        category: prev.category,
+        explanation: 'Verified: Defect no longer detected in latest code changes.',
+        resolvedAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  const allResolvedFindings = Array.from(resolvedMap.values());
 
   const severityRank: Record<Severity, number> = {
     CRITICAL: 0,
@@ -648,6 +755,7 @@ export async function performAIReview(
     summary: aiResponse.summary || 'Code review completed successfully.',
     stats: fullStats,
     findings: prioritizedFindings,
+    resolvedFindings: allResolvedFindings,
     detectedLanguages: context.detectedLanguages,
     detectedFrameworks: context.detectedFrameworks,
     targetPath: config.targetProjectPath,

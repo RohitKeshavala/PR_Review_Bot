@@ -45,6 +45,7 @@ export interface FileDiff {
 }
 
 export interface PRFinding {
+  id?: string;
   filePath: string;
   lineNumber: number;
   endLineNumber?: number;
@@ -55,6 +56,18 @@ export interface PRFinding {
   problem: string;
   whyItMatters: string;
   recommendationDiff?: string;
+}
+
+export interface ResolvedFinding {
+  id?: string;
+  filePath: string;
+  lineNumber?: number;
+  endLineNumber?: number;
+  title: string;
+  severity: Severity;
+  category: FindingCategory;
+  explanation?: string;
+  resolvedAt?: string;
 }
 
 export interface PRReviewStats {
@@ -75,6 +88,7 @@ export interface PRReviewReport {
   summary: string;
   stats: PRReviewStats;
   findings: PRFinding[];
+  resolvedFindings?: ResolvedFinding[];
   detectedLanguages?: string[];
   detectedFrameworks?: string[];
   targetPath?: string;

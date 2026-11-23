@@ -7,6 +7,8 @@ import { loadConfig, validateConfig } from './config.js';
 import { buildReviewContext } from './context-builder.js';
 import { toConsole, toGitHubMarkdown } from './formatter.js';
 import {
+  extractReviewStateFromFile,
+  fetchPreviousReviewState,
   fetchRemotePullRequestDiff,
   parseRepoString,
   postOrUpdateStickyComment,
@@ -14,7 +16,7 @@ import {
 } from './github-service.js';
 import { getDiff, parseDiff } from './git-service.js';
 import { performAIReview } from './reviewer.js';
-import type { FileDiff } from './types.js';
+import type { FileDiff, PRFinding, ResolvedFinding } from './types.js';
 
 const program = new Command();
 
@@ -81,11 +83,47 @@ program
         console.log(`🎯 Detected Frameworks: ${context.detectedFrameworks.join(', ')}`);
       }
 
-      // 4. Perform AI Review Reasoning
-      console.log('✨ Performing AI review analysis with Google Gemini...');
-      const report = await performAIReview(context, config);
+      // 4. Fetch previous review state to verify active defects across review rounds
+      let previousState = {
+        previousFindings: [] as PRFinding[],
+        previouslyResolved: [] as ResolvedFinding[],
+      };
 
-      // 5. Format and display console output
+      if (config.prNumber && config.githubRepository && config.githubToken) {
+        try {
+          const { owner, repo } = parseRepoString(config.githubRepository);
+          previousState = await fetchPreviousReviewState(
+            config.githubToken,
+            owner,
+            repo,
+            config.prNumber,
+          );
+        } catch (fetchPrevErr) {
+          console.warn(`⚠️ Warning: Could not fetch previous review state from GitHub: ${fetchPrevErr}`);
+        }
+      } else {
+        const localReportPath = path.resolve(process.cwd(), config.outputReportPath);
+        previousState = extractReviewStateFromFile(localReportPath);
+      }
+
+      if (previousState.previousFindings.length > 0) {
+        console.log(`📋 Found ${previousState.previousFindings.length} active defect(s) from previous review to verify.`);
+      }
+
+      // 5. Perform AI Review Reasoning with Semantic Defect Verification
+      console.log('✨ Performing AI review analysis with Google Gemini...');
+      const report = await performAIReview(
+        context,
+        config,
+        previousState.previousFindings,
+        previousState.previouslyResolved,
+      );
+
+      if (report.resolvedFindings && report.resolvedFindings.length > 0) {
+        console.log(`✅ Tracked ${report.resolvedFindings.length} resolved defect(s) across review rounds.`);
+      }
+
+      // 6. Format and display console output
       const consoleOutput = toConsole(report);
       console.log(consoleOutput);
 
@@ -100,8 +138,8 @@ program
         if (config.githubRepository && config.prNumber) {
           const { owner, repo } = parseRepoString(config.githubRepository);
 
-          // Submit formal PR Review (with inline comments)
-          await submitPullRequestReview(
+          // Submit formal PR Review (with inline comments and in-place updates)
+          const reviewSubmitted = await submitPullRequestReview(
             config.githubToken || '',
             owner,
             repo,
@@ -111,7 +149,8 @@ program
             config.dryRun,
           );
 
-          // Update sticky summary comment
+          // Update sticky summary comment if an existing one is already present
+          // (or if review submission was skipped/failed)
           await postOrUpdateStickyComment(
             config.githubToken || '',
             owner,
@@ -119,6 +158,7 @@ program
             config.prNumber,
             markdownOutput,
             config.dryRun,
+            reviewSubmitted,
           );
         } else if (config.postToGitHub) {
           console.warn('⚠️ --post-to-github specified but repository or PR number was not provided.');

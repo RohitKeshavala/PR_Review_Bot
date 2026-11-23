@@ -3,7 +3,15 @@ import path from 'node:path';
 import { Octokit } from '@octokit/rest';
 import { toInlineComment } from './formatter.js';
 import { normalizePath } from './git-service.js';
-import type { PRReviewReport, ReviewComment, ReviewPayload } from './types.js';
+import type {
+  FindingCategory,
+  PRFinding,
+  PRReviewReport,
+  ResolvedFinding,
+  ReviewComment,
+  ReviewPayload,
+  Severity,
+} from './types.js';
 
 const STICKY_COMMENT_MARKER = '<!-- ai-pr-review-bot-sticky -->';
 const REVIEW_TITLE_MARKER = 'AI Pull Request Code Review';
@@ -68,7 +76,7 @@ export async function submitPullRequestReview(
   report: PRReviewReport,
   markdownSummary: string,
   dryRun = false,
-): Promise<void> {
+): Promise<boolean> {
   // Map internal review verdict to GitHub event.
   // Instead of a direct formal 'APPROVE' (which GitHub Actions default token forbids),
   // submit as 'COMMENT' with a clear, positive "All looks good" review summary.
@@ -112,10 +120,95 @@ export async function submitPullRequestReview(
     const payloadPath = path.resolve(process.cwd(), 'PR_REVIEW_GITHUB_PAYLOAD.json');
     fs.writeFileSync(payloadPath, JSON.stringify(payload, null, 2), 'utf-8');
     console.log(`[DRY-RUN] Saved GitHub Review payload to: ${payloadPath}`);
-    return;
+    return true;
   }
 
   const octokit = getOctokitClient(token);
+
+  // 1. Fetch existing reviews by the bot to allow in-place updates or superseding
+  let existingBotReviews: Array<{
+    id: number;
+    state: string;
+    body: string;
+  }> = [];
+
+  try {
+    const reviewsResponse = await octokit.rest.pulls.listReviews({
+      owner,
+      repo,
+      pull_number: pullNumber,
+      per_page: 100,
+    });
+
+    existingBotReviews = reviewsResponse.data.filter(
+      (r) =>
+        r.body &&
+        (r.body.includes(STICKY_COMMENT_MARKER) || r.body.includes(REVIEW_TITLE_MARKER)) &&
+        r.state !== 'DISMISSED',
+    );
+  } catch (listErr) {
+    console.warn(`⚠️ Warning: Could not list existing PR reviews: ${listErr}`);
+  }
+
+  const latestReview =
+    existingBotReviews.length > 0 ? existingBotReviews[existingBotReviews.length - 1] : null;
+
+  // 2. In-place update check:
+  // If an existing review exists, no new inline comments need to be attached, and state does not conflict,
+  // update the existing review in-place rather than creating a new review thread.
+  const hasInlineComments = inlineComments.length > 0;
+  const stateMatches =
+    latestReview &&
+    ((latestReview.state === 'CHANGES_REQUESTED' && event === 'REQUEST_CHANGES') ||
+      (latestReview.state !== 'CHANGES_REQUESTED' && event === 'COMMENT'));
+
+  if (latestReview && !hasInlineComments && stateMatches) {
+    try {
+      console.log(`Updating existing PR Review (ID: ${latestReview.id}) in-place with latest report...`);
+      await octokit.rest.pulls.updateReview({
+        owner,
+        repo,
+        pull_number: pullNumber,
+        review_id: latestReview.id,
+        body: markdownSummary,
+      });
+      console.log(`✔ Successfully updated existing PR Review (ID: ${latestReview.id}) in-place.`);
+      return true;
+    } catch (updateErr) {
+      console.warn(`⚠️ In-place review update failed: ${updateErr}. Falling back to review submission...`);
+    }
+  }
+
+  // 3. If a new review must be submitted (new inline comments or verdict state changed):
+  // Dismiss previous bot reviews and collapse their summaries to prevent multiple active review threads.
+  if (existingBotReviews.length > 0) {
+    for (const oldReview of existingBotReviews) {
+      try {
+        console.log(`Dismissing previous PR Review (ID: ${oldReview.id}) to prevent duplicate review threads...`);
+        await octokit.rest.pulls.dismissReview({
+          owner,
+          repo,
+          pull_number: pullNumber,
+          review_id: oldReview.id,
+          message: 'Superseded by updated AI review for the latest commit.',
+        });
+      } catch (dismissErr) {
+        console.warn(`⚠️ Warning: Could not dismiss previous review (ID: ${oldReview.id}): ${dismissErr}`);
+      }
+
+      try {
+        await octokit.rest.pulls.updateReview({
+          owner,
+          repo,
+          pull_number: pullNumber,
+          review_id: oldReview.id,
+          body: `<details>\n<summary>📦 Outdated AI Review Report (Superseded)</summary>\n\n*(This review was superseded by the latest review).*</details>`,
+        });
+      } catch {
+        // Best effort body collapse
+      }
+    }
+  }
 
   // Helper to post review safely
   const attemptReview = async (reviewEvent: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT', withComments: boolean) => {
@@ -129,41 +222,41 @@ export async function submitPullRequestReview(
     });
   };
 
-  // 1. Primary Attempt (Original Event + Inline Comments)
+  // 4. Primary Attempt (Original Event + Inline Comments)
   try {
     console.log(`Submitting formal PR Review (${event}) with ${inlineComments.length} inline comments...`);
     await attemptReview(event, true);
     console.log(`✔ Successfully posted PR Review to ${owner}/${repo}#${pullNumber}`);
-    return;
+    return true;
   } catch (primaryErr: unknown) {
     const errorMsg = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
     console.warn(`⚠️ Warning: Primary review submission failed (${errorMsg}). Attempting fallback...`);
 
-    // 2. Fallback Attempt 1: Retry with 'COMMENT'
+    // 5. Fallback Attempt 1: Retry with 'COMMENT'
     const fallbackEvent = 'COMMENT' as const;
 
     try {
       console.log(`Retrying PR Review submission as (${fallbackEvent}) with inline comments...`);
       await attemptReview(fallbackEvent, true);
       console.log(`✔ Gracefully posted PR Review as (${fallbackEvent}) to ${owner}/${repo}#${pullNumber}`);
-      return;
+      return true;
     } catch (secondErr: unknown) {
       const secondMsg = secondErr instanceof Error ? secondErr.message : String(secondErr);
       console.warn(`⚠️ Warning: Secondary review submission failed (${secondMsg}). Retrying without inline comments...`);
     }
 
-    // 3. Fallback Attempt 2: Post review without inline comments (avoids 422 line mismatches)
+    // 6. Fallback Attempt 2: Post review without inline comments (avoids 422 line mismatches)
     try {
       console.log(`Retrying PR Review submission as (${fallbackEvent}) without inline comments...`);
       await attemptReview(fallbackEvent, false);
       console.log(`✔ Gracefully posted PR Review (top-level summary) to ${owner}/${repo}#${pullNumber}`);
-      return;
+      return true;
     } catch (thirdErr: unknown) {
       const thirdMsg = thirdErr instanceof Error ? thirdErr.message : String(thirdErr);
       console.warn(`⚠️ Warning: Formal PR review failed (${thirdMsg}). Falling back to PR issue comment...`);
     }
 
-    // 4. Final Fallback: Post as a standard PR issue comment
+    // 7. Final Fallback: Post as a standard PR issue comment
     try {
       await octokit.rest.issues.createComment({
         owner,
@@ -172,9 +265,11 @@ export async function submitPullRequestReview(
         body: markdownSummary,
       });
       console.log(`✔ Successfully posted PR Review as top-level comment to ${owner}/${repo}#${pullNumber}`);
+      return true;
     } catch (finalErr: unknown) {
       const finalMsg = finalErr instanceof Error ? finalErr.message : String(finalErr);
       console.error(`❌ Error: All review posting methods failed: ${finalMsg}`);
+      return false;
     }
   }
 }
@@ -190,6 +285,7 @@ export async function postOrUpdateStickyComment(
   pullNumber: number,
   body: string,
   dryRun = false,
+  onlyIfExisting = false,
 ): Promise<void> {
   if (dryRun) {
     console.log(`[DRY-RUN] Skipped sticky comment post/update to ${owner}/${repo}#${pullNumber}`);
@@ -222,7 +318,7 @@ export async function postOrUpdateStickyComment(
         body,
       });
       console.log(`✔ Successfully updated sticky PR review comment in-place.`);
-    } else {
+    } else if (!onlyIfExisting) {
       console.log(`Creating new sticky PR review comment on ${owner}/${repo}#${pullNumber}...`);
       await octokit.rest.issues.createComment({
         owner,
@@ -231,10 +327,213 @@ export async function postOrUpdateStickyComment(
         body,
       });
       console.log(`✔ Successfully created sticky PR review comment.`);
+    } else {
+      console.log(`ℹ️ Sticky comment creation skipped because formal review is already active.`);
     }
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : String(err);
     console.warn(`⚠️ Warning: Failed to post/update sticky comment: ${errorMsg}`);
   }
+}
+
+/**
+ * Extracts previous findings and previously resolved defects from a review markdown body
+ */
+export function extractReviewState(body: string): {
+  previousFindings: PRFinding[];
+  previouslyResolved: ResolvedFinding[];
+} {
+  // 1. Check for embedded machine-readable state payload
+  const match = body.match(/<!-- ai-review-state:\s*([\s\S]*?)\s*-->/);
+  if (match) {
+    try {
+      const data = JSON.parse(match[1]);
+      return {
+        previousFindings: Array.isArray(data.findings) ? data.findings : [],
+        previouslyResolved: Array.isArray(data.resolved) ? data.resolved : [],
+      };
+    } catch {
+      // Fall through to markdown table parsing
+    }
+  }
+
+  // 2. Fallback: Parse markdown table rows from previous review body
+  const findings: PRFinding[] = [];
+  const resolved: ResolvedFinding[] = [];
+
+  const tableRowRegex =
+    /\|\s*\d+\s*\|\s*`([A-Z]+)`\s*\|\s*([^|]+)\s*\|\s*`([^`:]+)(?::(\d+)(?:-(\d+))?)?`\s*\|\s*([^|]+)\s*\|/g;
+  let rowMatch;
+  while ((rowMatch = tableRowRegex.exec(body)) !== null) {
+    const severity = rowMatch[1] as Severity;
+    const category = rowMatch[2].trim() as FindingCategory;
+    const filePath = rowMatch[3].trim();
+    const startLine = rowMatch[4] ? Number(rowMatch[4]) : 1;
+    const endLine = rowMatch[5] ? Number(rowMatch[5]) : undefined;
+    const title = rowMatch[6].trim();
+
+    findings.push({
+      filePath,
+      lineNumber: startLine,
+      endLineNumber: endLine,
+      title,
+      severity,
+      category,
+      inDiffHunk: true,
+      problem: '',
+      whyItMatters: '',
+    });
+  }
+
+  return { previousFindings: findings, previouslyResolved: resolved };
+}
+
+/**
+ * Reads previous review state from local markdown report file
+ */
+export function extractReviewStateFromFile(filePath: string): {
+  previousFindings: PRFinding[];
+  previouslyResolved: ResolvedFinding[];
+} {
+  if (fs.existsSync(filePath)) {
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      return extractReviewState(content);
+    } catch {
+      // ignore
+    }
+  }
+  return { previousFindings: [], previouslyResolved: [] };
+}
+
+/**
+ * Fetches previous review state from GitHub PR reviews or sticky comments
+ */
+export async function fetchPreviousReviewState(
+  token: string,
+  owner: string,
+  repo: string,
+  pullNumber: number,
+): Promise<{ previousFindings: PRFinding[]; previouslyResolved: ResolvedFinding[] }> {
+  try {
+    const octokit = getOctokitClient(token);
+
+    // 1. Check existing reviews
+    const reviewsResponse = await octokit.rest.pulls.listReviews({
+      owner,
+      repo,
+      pull_number: pullNumber,
+      per_page: 100,
+    });
+
+    const botReviews = reviewsResponse.data.filter(
+      (r) =>
+        r.body &&
+        (r.body.includes(STICKY_COMMENT_MARKER) || r.body.includes(REVIEW_TITLE_MARKER)),
+    );
+
+    if (botReviews.length > 0) {
+      const latest = botReviews[botReviews.length - 1];
+      const parsed = extractReviewState(latest.body || '');
+      if (parsed.previousFindings.length > 0 || parsed.previouslyResolved.length > 0) {
+        return parsed;
+      }
+    }
+
+    // 2. Check issue comments as fallback
+    const commentsResponse = await octokit.rest.issues.listComments({
+      owner,
+      repo,
+      issue_number: pullNumber,
+      per_page: 100,
+    });
+
+    const botComments = commentsResponse.data.filter(
+      (c) =>
+        c.body &&
+        (c.body.includes(STICKY_COMMENT_MARKER) || c.body.includes(REVIEW_TITLE_MARKER)),
+    );
+
+    if (botComments.length > 0) {
+      const latest = botComments[botComments.length - 1];
+      const parsed = extractReviewState(latest.body || '');
+      if (parsed.previousFindings.length > 0 || parsed.previouslyResolved.length > 0) {
+        return parsed;
+      }
+    }
+  } catch (err) {
+    console.warn(`⚠️ Warning: Could not fetch previous review state: ${err}`);
+  }
+
+  return { previousFindings: [], previouslyResolved: [] };
+}
+
+/**
+ * Calculates resolved findings by comparing previous findings against current findings,
+ * while carrying forward all previously resolved defects across all reviews on this PR.
+ */
+export function calculateResolvedFindings(
+  previousFindings: PRFinding[],
+  currentFindings: PRFinding[],
+  previouslyResolved: ResolvedFinding[] = [],
+): ResolvedFinding[] {
+  const isMatch = (
+    a: { filePath: string; lineNumber?: number; title: string; category?: string },
+    b: { filePath: string; lineNumber?: number; title: string; category?: string },
+  ) => {
+    if (normalizePath(a.filePath) !== normalizePath(b.filePath)) return false;
+
+    // Check title similarity (case-insensitive alphanumeric)
+    const cleanA = a.title.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const cleanB = b.title.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (cleanA === cleanB || cleanA.includes(cleanB) || cleanB.includes(cleanA)) {
+      return true;
+    }
+
+    // Check line proximity if category matches
+    if (a.category && b.category && a.category === b.category) {
+      if (a.lineNumber !== undefined && b.lineNumber !== undefined) {
+        if (Math.abs(a.lineNumber - b.lineNumber) <= 10) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  };
+
+  // 1. Identify which previous findings are no longer present in current findings (newly resolved)
+  const newlyResolved: ResolvedFinding[] = [];
+  for (const prev of previousFindings) {
+    const stillActive = currentFindings.some((curr) => isMatch(prev, curr));
+    if (!stillActive) {
+      newlyResolved.push({
+        filePath: prev.filePath,
+        lineNumber: prev.lineNumber,
+        endLineNumber: prev.endLineNumber,
+        title: prev.title,
+        severity: prev.severity,
+        category: prev.category,
+        resolvedAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  // 2. Combine previously resolved with newly resolved
+  const allResolvedMap = new Map<string, ResolvedFinding>();
+
+  for (const res of previouslyResolved) {
+    // If a previously resolved finding is re-introduced in current findings, don't keep it resolved
+    const reIntroduced = currentFindings.some((curr) => isMatch(res, curr));
+    if (!reIntroduced) {
+      allResolvedMap.set(`${normalizePath(res.filePath)}::${res.title.toLowerCase().trim()}`, res);
+    }
+  }
+
+  for (const res of newlyResolved) {
+    allResolvedMap.set(`${normalizePath(res.filePath)}::${res.title.toLowerCase().trim()}`, res);
+  }
+
+  return Array.from(allResolvedMap.values());
 }
 
