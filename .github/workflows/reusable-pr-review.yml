@@ -12,7 +12,7 @@ on:
         description: 'Fail CI job if CHANGES_REQUESTED is issued'
         type: boolean
         required: false
-        default: false
+        default: true
     secrets:
       GEMINI_API_KEY:
         description: 'Google Gemini API key'
