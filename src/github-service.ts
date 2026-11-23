@@ -77,6 +77,7 @@ export async function submitPullRequestReview(
   report: PRReviewReport,
   markdownSummary: string,
   dryRun = false,
+  previouslyResolved: ResolvedFinding[] = [],
 ): Promise<boolean> {
   // Map internal review verdict to GitHub event.
   // Instead of a direct formal 'APPROVE' (which GitHub Actions default token forbids),
@@ -160,6 +161,7 @@ export async function submitPullRequestReview(
     pull_request_review_id: number | null;
     path?: string;
     line?: number;
+    position?: number | null;
   }> = [];
   try {
     const commentsResp = await octokit.rest.pulls.listReviewComments({
@@ -173,15 +175,41 @@ export async function submitPullRequestReview(
     console.warn(`⚠️ Warning: Could not list review comments: ${listCommentsErr}`);
   }
 
-  // Check if any finding in inlineComments requires posting a NEW comment on GitHub
+  // Active comments on the current PR review (not outdated or from dismissed reviews)
+  const activeExistingComments = existingReviewComments.filter((c) => {
+    if (latestReview && c.pull_request_review_id !== latestReview.id) {
+      return false;
+    }
+    // In GitHub REST API, position === null indicates the comment is Outdated on the diff
+    if (c.position === null) {
+      return false;
+    }
+    if (c.line === null || c.line === undefined) {
+      return false;
+    }
+    return true;
+  });
+
+  // Check if any finding in inlineComments requires posting a NEW comment on GitHub:
+  // 1. Any re-introduced defect (previously marked resolved) requires a new active comment!
+  // 2. Any finding that does NOT already have an active comment on GitHub requires a comment!
   const hasNewInlineComments = inlineComments.some((f) => {
-    return !existingReviewComments.some((c) => {
+    const isReintroduced = (previouslyResolved || []).some((r) =>
+      isSameDefect(r, { filePath: f.path, lineNumber: f.line, endLineNumber: f.line }),
+    );
+    if (isReintroduced) {
+      return true;
+    }
+
+    const hasActiveComment = activeExistingComments.some((c) => {
       const commentPath = c.path ? normalizePath(c.path) : '';
       return isSameDefect(
         { filePath: f.path, lineNumber: f.line, endLineNumber: f.line },
         { filePath: commentPath, lineNumber: c.line || 0, endLineNumber: c.line || 0 },
       );
     });
+
+    return !hasActiveComment;
   });
 
   const stateMatches =
@@ -266,12 +294,14 @@ export async function submitPullRequestReview(
       }
 
       try {
+        const oldStateMatch = oldReview.body.match(/<!-- ai-review-state:\s*([\s\S]*?)\s*-->/);
+        const stateTag = oldStateMatch ? `\n${oldStateMatch[0]}` : '';
         await octokit.rest.pulls.updateReview({
           owner,
           repo,
           pull_number: pullNumber,
           review_id: oldReview.id,
-          body: `<details>\n<summary>📦 Outdated AI Review Report (Superseded)</summary>\n\n*(This review was superseded by the latest review).*</details>`,
+          body: `<details>\n<summary>📦 Outdated AI Review Report (Superseded)</summary>\n\n*(This review was superseded by the latest review).*</details>${stateTag}`,
         });
       } catch {
         // Best effort body collapse
@@ -522,7 +552,7 @@ export async function fetchPreviousReviewState(
   try {
     const octokit = getOctokitClient(token);
 
-    // 1. Check existing reviews
+    // 1. Check existing reviews (iterate from newest to oldest)
     const reviewsResponse = await octokit.rest.pulls.listReviews({
       owner,
       repo,
@@ -530,21 +560,23 @@ export async function fetchPreviousReviewState(
       per_page: 100,
     });
 
-    const botReviews = reviewsResponse.data.filter(
-      (r) =>
-        r.body &&
-        (r.body.includes(STICKY_COMMENT_MARKER) || r.body.includes(REVIEW_TITLE_MARKER)),
-    );
+    const botReviews = reviewsResponse.data
+      .filter(
+        (r) =>
+          r.body &&
+          (r.body.includes(STICKY_COMMENT_MARKER) || r.body.includes(REVIEW_TITLE_MARKER)),
+      )
+      .sort((a, b) => a.id - b.id);
 
-    if (botReviews.length > 0) {
-      const latest = botReviews[botReviews.length - 1];
-      const parsed = extractReviewState(latest.body || '');
+    for (let i = botReviews.length - 1; i >= 0; i--) {
+      const review = botReviews[i];
+      const parsed = extractReviewState(review.body || '');
       if (parsed.previousFindings.length > 0 || parsed.previouslyResolved.length > 0) {
         return parsed;
       }
     }
 
-    // 2. Check issue comments as fallback
+    // 2. Check issue comments as fallback (iterate from newest to oldest)
     const commentsResponse = await octokit.rest.issues.listComments({
       owner,
       repo,
@@ -552,15 +584,17 @@ export async function fetchPreviousReviewState(
       per_page: 100,
     });
 
-    const botComments = commentsResponse.data.filter(
-      (c) =>
-        c.body &&
-        (c.body.includes(STICKY_COMMENT_MARKER) || c.body.includes(REVIEW_TITLE_MARKER)),
-    );
+    const botComments = commentsResponse.data
+      .filter(
+        (c) =>
+          c.body &&
+          (c.body.includes(STICKY_COMMENT_MARKER) || c.body.includes(REVIEW_TITLE_MARKER)),
+      )
+      .sort((a, b) => a.id - b.id);
 
-    if (botComments.length > 0) {
-      const latest = botComments[botComments.length - 1];
-      const parsed = extractReviewState(latest.body || '');
+    for (let i = botComments.length - 1; i >= 0; i--) {
+      const comment = botComments[i];
+      const parsed = extractReviewState(comment.body || '');
       if (parsed.previousFindings.length > 0 || parsed.previouslyResolved.length > 0) {
         return parsed;
       }

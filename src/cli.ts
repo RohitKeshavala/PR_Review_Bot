@@ -147,6 +147,7 @@ program
             report,
             markdownOutput,
             config.dryRun,
+            previousState.previouslyResolved,
           );
 
           // Update sticky summary comment if an existing one is already present

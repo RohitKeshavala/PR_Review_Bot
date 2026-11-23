@@ -617,9 +617,13 @@ export function isSameDefect(
     id?: string;
   },
 ): boolean {
-  // 1. Explicit ID match (e.g., 'defect-1')
-  if (a.id && b.id && a.id === b.id) {
-    return true;
+  // 1. Explicit ID check:
+  if (a.id && b.id) {
+    if (a.id === b.id) {
+      return true;
+    }
+    // If both have explicit, distinct tracking IDs (e.g. 'defect-1' vs 'defect-2'), they are different defects
+    return false;
   }
 
   // 2. Normalized file path comparison (case-insensitive & cross-platform)
@@ -664,7 +668,13 @@ export function isSameDefect(
 
   if (titleA && titleB) {
     if (titleA === titleB || titleA.includes(titleB) || titleB.includes(titleA)) {
-      return true;
+      if (startA > 0 && startB > 0) {
+        if (Math.abs(startA - startB) <= 25) {
+          return true;
+        }
+      } else {
+        return true;
+      }
     }
 
     const stopWords = new Set([
@@ -701,9 +711,15 @@ export function isSameDefect(
     );
     const common = [...wordsA].filter((w) => wordsB.has(w));
     if (common.length >= 2) {
-      return true;
+      if (startA > 0 && startB > 0) {
+        if (Math.abs(startA - startB) <= 20) {
+          return true;
+        }
+      } else {
+        return true;
+      }
     }
-    if (common.length >= 1 && startA > 0 && startB > 0 && Math.abs(startA - startB) <= 15) {
+    if (common.length >= 1 && startA > 0 && startB > 0 && Math.abs(startA - startB) <= 10) {
       return true;
     }
   }
