@@ -530,13 +530,13 @@ export function calculateScoreAndVerdict(findings: PRFinding[]): {
   else grade = 'F';
 
   // Determine Verdict
-  // CHANGES_REQUESTED: If >= 1 Critical or >= 1 High issue.
-  // APPROVE_WITH_COMMENTS: If only Medium/Low issues remain.
+  // CHANGES_REQUESTED: If >= 1 Critical, >= 1 High, or >= 1 Medium issue.
+  // APPROVE_WITH_COMMENTS: If only Low issues remain.
   // APPROVE: Clean diff with 0 issues (or only informational).
   let verdict: ReviewVerdict = 'APPROVE';
-  if (criticalIssues > 0 || highIssues > 0) {
+  if (criticalIssues > 0 || highIssues > 0 || mediumIssues > 0) {
     verdict = 'CHANGES_REQUESTED';
-  } else if (mediumIssues > 0 || lowIssues > 0) {
+  } else if (lowIssues > 0) {
     verdict = 'APPROVE_WITH_COMMENTS';
   } else {
     verdict = 'APPROVE';

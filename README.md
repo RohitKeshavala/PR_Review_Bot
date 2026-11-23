@@ -110,9 +110,9 @@ $$\text{Health Score} = 100 - (\text{Critical} \times 30 + \text{High} \times 15
 | < 40 | **F** |
 
 ### Verdict Engine
-- `CHANGES_REQUESTED`: Issued if $\ge 1$ Critical defect, $\ge 1$ High defect, or any automated tooling check failed.
-- `APPROVE_WITH_COMMENTS`: Issued if only Medium or Low issues are identified.
-- `APPROVE`: Clean diff with 0 defects.
+- `CHANGES_REQUESTED`: Issued if $\ge 1$ Critical defect, $\ge 1$ High defect, $\ge 1$ Medium defect, or any automated tooling check failed.
+- `APPROVE_WITH_COMMENTS`: Issued if only Low issues are identified.
+- `APPROVE`: Clean diff with 0 defects (or only informational).
 
 ---
 
