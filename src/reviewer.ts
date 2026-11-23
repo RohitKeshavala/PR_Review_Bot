@@ -1,6 +1,6 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import type { ReviewContext } from './context-builder.js';
-import { isLineInDiffHunk, isRangeInDiffHunk } from './git-service.js';
+import { isLineInDiffHunk, isRangeInDiffHunk, normalizePath } from './git-service.js';
 import type {
   AppConfig,
   FindingCategory,
@@ -596,6 +596,122 @@ export function calculateScoreAndVerdict(findings: PRFinding[]): {
 }
 
 /**
+ * Accurately determines if two defects represent the exact same issue across commits,
+ * resilient to Windows/Linux path differences, casing, title rephrasing, and line number shifts.
+ */
+export function isSameDefect(
+  a: {
+    filePath: string;
+    lineNumber?: number;
+    endLineNumber?: number;
+    title?: string;
+    category?: string;
+    id?: string;
+  },
+  b: {
+    filePath: string;
+    lineNumber?: number;
+    endLineNumber?: number;
+    title?: string;
+    category?: string;
+    id?: string;
+  },
+): boolean {
+  // 1. Explicit ID match (e.g., 'defect-1')
+  if (a.id && b.id && a.id === b.id) {
+    return true;
+  }
+
+  // 2. Normalized file path comparison (case-insensitive & cross-platform)
+  const pathA = normalizePath(a.filePath).toLowerCase();
+  const pathB = normalizePath(b.filePath).toLowerCase();
+  const pathsMatch =
+    pathA === pathB ||
+    pathA.endsWith(`/${pathB}`) ||
+    pathB.endsWith(`/${pathA}`);
+  if (!pathsMatch) {
+    return false;
+  }
+
+  const startA = a.lineNumber ?? 0;
+  const endA = a.endLineNumber && a.endLineNumber >= startA ? a.endLineNumber : startA;
+  const startB = b.lineNumber ?? 0;
+  const endB = b.endLineNumber && b.endLineNumber >= startB ? b.endLineNumber : startB;
+
+  // 3. Exact line match or overlapping line ranges in the same file
+  if (startA > 0 && startB > 0) {
+    // Exact same start line or overlapping multi-line replacement ranges
+    if (startA === startB || (startA <= endB && startB <= endA)) {
+      return true;
+    }
+
+    // Direct line proximity (within 5 lines) in the same file
+    if (Math.abs(startA - startB) <= 5) {
+      return true;
+    }
+
+    // Line shift within 15 lines with matching category
+    if (Math.abs(startA - startB) <= 15) {
+      if (a.category && b.category && a.category.toLowerCase() === b.category.toLowerCase()) {
+        return true;
+      }
+    }
+  }
+
+  // 4. Title similarity matching (resilient to LLM rephrasing)
+  const titleA = (a.title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const titleB = (b.title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  if (titleA && titleB) {
+    if (titleA === titleB || titleA.includes(titleB) || titleB.includes(titleA)) {
+      return true;
+    }
+
+    const stopWords = new Set([
+      'the',
+      'and',
+      'for',
+      'with',
+      'that',
+      'this',
+      'from',
+      'issue',
+      'defect',
+      'detected',
+      'bug',
+      'error',
+      'warning',
+      'problem',
+      'missing',
+      'failed',
+      'invalid',
+      'check',
+    ]);
+    const wordsA = new Set(
+      (a.title || '')
+        .toLowerCase()
+        .split(/\W+/)
+        .filter((w) => w.length >= 3 && !stopWords.has(w)),
+    );
+    const wordsB = new Set(
+      (b.title || '')
+        .toLowerCase()
+        .split(/\W+/)
+        .filter((w) => w.length >= 3 && !stopWords.has(w)),
+    );
+    const common = [...wordsA].filter((w) => wordsB.has(w));
+    if (common.length >= 2) {
+      return true;
+    }
+    if (common.length >= 1 && startA > 0 && startB > 0 && Math.abs(startA - startB) <= 15) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Main review reasoning engine
  */
 export async function performAIReview(
@@ -662,48 +778,41 @@ export async function performAIReview(
 
   // 1. Carry forward previously resolved defects (unless re-introduced in current code)
   for (const prevRes of previouslyResolved) {
-    const isReIntroduced = validatedFindings.some(
-      (vf) =>
-        (prevRes.id && vf.id === prevRes.id) ||
-        (vf.filePath === prevRes.filePath &&
-          vf.title.toLowerCase().replace(/[^a-z0-9]/g, '') ===
-            prevRes.title.toLowerCase().replace(/[^a-z0-9]/g, '')),
-    );
+    const isReIntroduced = validatedFindings.some((vf) => isSameDefect(prevRes, vf));
     if (!isReIntroduced) {
-      resolvedMap.set(prevRes.id || `${prevRes.filePath}::${prevRes.title}`, prevRes);
+      resolvedMap.set(prevRes.id || `${normalizePath(prevRes.filePath)}::${prevRes.title}`, prevRes);
     }
   }
 
   // 2. Add defects confirmed resolved by Gemini in this review round
   const aiResolvedList = aiResponse.resolvedDefectIds || [];
   for (const aiRes of aiResolvedList) {
-    const matchingPrev = previousActiveFindings.find((p) => p.id === aiRes.id);
+    const matchingPrev = previousActiveFindings.find(
+      (p) => p.id === aiRes.id || isSameDefect(p, { id: aiRes.id, filePath: p.filePath, lineNumber: p.lineNumber }),
+    );
     if (matchingPrev) {
-      resolvedMap.set(aiRes.id, {
-        id: aiRes.id,
-        filePath: matchingPrev.filePath,
-        lineNumber: matchingPrev.lineNumber,
-        endLineNumber: matchingPrev.endLineNumber,
-        title: matchingPrev.title,
-        severity: matchingPrev.severity,
-        category: matchingPrev.category,
-        explanation: aiRes.explanation,
-        resolvedAt: new Date().toISOString(),
-      });
+      const isReIntroduced = validatedFindings.some((vf) => isSameDefect(matchingPrev, vf));
+      if (!isReIntroduced) {
+        resolvedMap.set(aiRes.id, {
+          id: aiRes.id,
+          filePath: matchingPrev.filePath,
+          lineNumber: matchingPrev.lineNumber,
+          endLineNumber: matchingPrev.endLineNumber,
+          title: matchingPrev.title,
+          severity: matchingPrev.severity,
+          category: matchingPrev.category,
+          explanation: aiRes.explanation,
+          resolvedAt: new Date().toISOString(),
+        });
+      }
     }
   }
 
   // 3. Deterministic safety check: if a previous defect is no longer detected in findings
   // and not yet in resolvedMap, mark it resolved
   for (const prev of previousActiveFindings) {
-    const prevKey = prev.id || `${prev.filePath}::${prev.title}`;
-    const stillActive = validatedFindings.some(
-      (vf) =>
-        (prev.id && vf.id === prev.id) ||
-        (vf.filePath === prev.filePath &&
-          vf.title.toLowerCase().replace(/[^a-z0-9]/g, '') ===
-            prev.title.toLowerCase().replace(/[^a-z0-9]/g, '')),
-    );
+    const prevKey = prev.id || `${normalizePath(prev.filePath)}::${prev.title}`;
+    const stillActive = validatedFindings.some((vf) => isSameDefect(prev, vf));
     if (!stillActive && !resolvedMap.has(prevKey)) {
       resolvedMap.set(prevKey, {
         id: prev.id,
@@ -719,7 +828,10 @@ export async function performAIReview(
     }
   }
 
-  const allResolvedFindings = Array.from(resolvedMap.values());
+  // Final safety filter: NO finding present in validatedFindings can EVER appear in resolvedFindings
+  const allResolvedFindings = Array.from(resolvedMap.values()).filter((res) => {
+    return !validatedFindings.some((vf) => isSameDefect(res, vf));
+  });
 
   const severityRank: Record<Severity, number> = {
     CRITICAL: 0,

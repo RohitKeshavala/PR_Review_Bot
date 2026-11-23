@@ -3,6 +3,7 @@ import path from 'node:path';
 import { Octokit } from '@octokit/rest';
 import { toInlineComment } from './formatter.js';
 import { normalizePath } from './git-service.js';
+import { isSameDefect } from './reviewer.js';
 import type {
   FindingCategory,
   PRFinding,
@@ -153,16 +154,44 @@ export async function submitPullRequestReview(
   const latestReview =
     existingBotReviews.length > 0 ? existingBotReviews[existingBotReviews.length - 1] : null;
 
-  // 2. In-place update check:
-  // If an existing review exists, no new inline comments need to be attached, and state does not conflict,
-  // update the existing review in-place rather than creating a new review thread.
-  const hasInlineComments = inlineComments.length > 0;
+  // 2. Fetch existing review comments on the PR to know if all inline comments are already posted
+  let existingReviewComments: Array<{
+    id: number;
+    pull_request_review_id: number | null;
+    path?: string;
+    line?: number;
+  }> = [];
+  try {
+    const commentsResp = await octokit.rest.pulls.listReviewComments({
+      owner,
+      repo,
+      pull_number: pullNumber,
+      per_page: 100,
+    });
+    existingReviewComments = commentsResp.data;
+  } catch (listCommentsErr) {
+    console.warn(`⚠️ Warning: Could not list review comments: ${listCommentsErr}`);
+  }
+
+  // Check if any finding in inlineComments requires posting a NEW comment on GitHub
+  const hasNewInlineComments = inlineComments.some((f) => {
+    return !existingReviewComments.some((c) => {
+      const commentPath = c.path ? normalizePath(c.path) : '';
+      return isSameDefect(
+        { filePath: f.path, lineNumber: f.line, endLineNumber: f.line },
+        { filePath: commentPath, lineNumber: c.line || 0, endLineNumber: c.line || 0 },
+      );
+    });
+  });
+
   const stateMatches =
     latestReview &&
     ((latestReview.state === 'CHANGES_REQUESTED' && event === 'REQUEST_CHANGES') ||
       (latestReview.state !== 'CHANGES_REQUESTED' && event === 'COMMENT'));
 
-  if (latestReview && !hasInlineComments && stateMatches) {
+  // In-place update: If an existing review exists, state does not conflict, and NO NEW inline comments
+  // need to be posted, update the existing review in-place rather than creating a new review thread.
+  if (latestReview && !hasNewInlineComments && stateMatches) {
     try {
       console.log(`Updating existing PR Review (ID: ${latestReview.id}) in-place with latest report...`);
       await octokit.rest.pulls.updateReview({
@@ -179,8 +208,9 @@ export async function submitPullRequestReview(
     }
   }
 
-  // 3. If a new review must be submitted (new inline comments or verdict state changed):
-  // Dismiss previous bot reviews and collapse their summaries to prevent multiple active review threads.
+  // 3. If a new review must be submitted (brand-new inline comments or verdict state changed):
+  // Dismiss previous bot reviews, delete stale comments to avoid duplicate stacking in Files Changed,
+  // and collapse review bodies.
   if (existingBotReviews.length > 0) {
     for (const oldReview of existingBotReviews) {
       try {
@@ -194,6 +224,45 @@ export async function submitPullRequestReview(
         });
       } catch (dismissErr) {
         console.warn(`⚠️ Warning: Could not dismiss previous review (ID: ${oldReview.id}): ${dismissErr}`);
+      }
+
+      // Delete old inline comments ONLY for still-active defects being re-posted,
+      // and NEVER delete comments for resolved defects (preserving the full audit trail in GitHub).
+      const commentsToDelete = existingReviewComments.filter((c) => {
+        if (c.pull_request_review_id !== oldReview.id) return false;
+
+        const commentPath = c.path ? normalizePath(c.path) : '';
+        const commentFinding = {
+          filePath: commentPath,
+          lineNumber: c.line || 0,
+          endLineNumber: c.line || 0,
+        };
+
+        // 1. If this comment belongs to a resolved defect, KEEP IT (do not delete)!
+        const isResolved = (report.resolvedFindings || []).some((rf) =>
+          isSameDefect(rf, commentFinding),
+        );
+        if (isResolved) {
+          return false;
+        }
+
+        // 2. Only clean up if this defect is still active and is being re-posted on the latest commit
+        const isStillActiveAndRePosted = report.findings.some(
+          (f) => f.inDiffHunk && isSameDefect(f, commentFinding),
+        );
+
+        return isStillActiveAndRePosted;
+      });
+      for (const c of commentsToDelete) {
+        try {
+          await octokit.rest.pulls.deleteReviewComment({
+            owner,
+            repo,
+            comment_id: c.id,
+          });
+        } catch {
+          // Best effort comment cleanup
+        }
       }
 
       try {
@@ -361,10 +430,45 @@ export function extractReviewState(body: string): {
   const findings: PRFinding[] = [];
   const resolved: ResolvedFinding[] = [];
 
+  // Parse Resolved Defects section if present
+  const resolvedSectionMatch = body.match(/### ✅ Resolved Defects[^\n]*\n([\s\S]*?)(?:\n### |\n---|$)/);
+  if (resolvedSectionMatch) {
+    const resolvedTable = resolvedSectionMatch[1];
+    const resolvedRowRegex =
+      /\|\s*\d+\s*\|\s*`([A-Z]+)`\s*\|\s*([^|]+)\s*\|\s*`([^`:]+)(?::(\d+)(?:-(\d+))?)?`\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|/g;
+    let rMatch;
+    while ((rMatch = resolvedRowRegex.exec(resolvedTable)) !== null) {
+      const severity = rMatch[1] as Severity;
+      const category = rMatch[2].trim() as FindingCategory;
+      const filePath = rMatch[3].trim();
+      const startLine = rMatch[4] ? Number(rMatch[4]) : 1;
+      const endLine = rMatch[5] ? Number(rMatch[5]) : undefined;
+      const title = rMatch[6].replace(/^~~/, '').replace(/~~$/, '').trim();
+      const statusText = rMatch[7].trim();
+
+      resolved.push({
+        filePath,
+        lineNumber: startLine,
+        endLineNumber: endLine,
+        title,
+        severity,
+        category,
+        explanation: statusText
+          .replace(/^✅\s*\*\*Resolved:\*\*\s*/, '')
+          .replace(/^✅\s*\*\*Resolved\*\*/, '')
+          .trim(),
+        resolvedAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  // Parse Review Findings section if present
+  const findingsSectionMatch = body.match(/### 🔎 Review Findings[^\n]*\n([\s\S]*?)(?:\n### |\n---|$)/);
+  const findingsTable = findingsSectionMatch ? findingsSectionMatch[1] : (resolvedSectionMatch ? '' : body);
   const tableRowRegex =
     /\|\s*\d+\s*\|\s*`([A-Z]+)`\s*\|\s*([^|]+)\s*\|\s*`([^`:]+)(?::(\d+)(?:-(\d+))?)?`\s*\|\s*([^|]+)\s*\|/g;
   let rowMatch;
-  while ((rowMatch = tableRowRegex.exec(body)) !== null) {
+  while ((rowMatch = tableRowRegex.exec(findingsTable)) !== null) {
     const severity = rowMatch[1] as Severity;
     const category = rowMatch[2].trim() as FindingCategory;
     const filePath = rowMatch[3].trim();
@@ -477,43 +581,20 @@ export function calculateResolvedFindings(
   currentFindings: PRFinding[],
   previouslyResolved: ResolvedFinding[] = [],
 ): ResolvedFinding[] {
-  const isMatch = (
-    a: { filePath: string; lineNumber?: number; title: string; category?: string },
-    b: { filePath: string; lineNumber?: number; title: string; category?: string },
-  ) => {
-    if (normalizePath(a.filePath) !== normalizePath(b.filePath)) return false;
-
-    // Check title similarity (case-insensitive alphanumeric)
-    const cleanA = a.title.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const cleanB = b.title.toLowerCase().replace(/[^a-z0-9]/g, '');
-    if (cleanA === cleanB || cleanA.includes(cleanB) || cleanB.includes(cleanA)) {
-      return true;
-    }
-
-    // Check line proximity if category matches
-    if (a.category && b.category && a.category === b.category) {
-      if (a.lineNumber !== undefined && b.lineNumber !== undefined) {
-        if (Math.abs(a.lineNumber - b.lineNumber) <= 10) {
-          return true;
-        }
-      }
-    }
-
-    return false;
-  };
-
   // 1. Identify which previous findings are no longer present in current findings (newly resolved)
   const newlyResolved: ResolvedFinding[] = [];
   for (const prev of previousFindings) {
-    const stillActive = currentFindings.some((curr) => isMatch(prev, curr));
+    const stillActive = currentFindings.some((curr) => isSameDefect(prev, curr));
     if (!stillActive) {
       newlyResolved.push({
+        id: prev.id,
         filePath: prev.filePath,
         lineNumber: prev.lineNumber,
         endLineNumber: prev.endLineNumber,
         title: prev.title,
         severity: prev.severity,
         category: prev.category,
+        explanation: 'Verified: Defect no longer detected in latest code changes.',
         resolvedAt: new Date().toISOString(),
       });
     }
@@ -524,14 +605,14 @@ export function calculateResolvedFindings(
 
   for (const res of previouslyResolved) {
     // If a previously resolved finding is re-introduced in current findings, don't keep it resolved
-    const reIntroduced = currentFindings.some((curr) => isMatch(res, curr));
+    const reIntroduced = currentFindings.some((curr) => isSameDefect(res, curr));
     if (!reIntroduced) {
-      allResolvedMap.set(`${normalizePath(res.filePath)}::${res.title.toLowerCase().trim()}`, res);
+      allResolvedMap.set(res.id || `${normalizePath(res.filePath)}::${res.title.toLowerCase().trim()}`, res);
     }
   }
 
   for (const res of newlyResolved) {
-    allResolvedMap.set(`${normalizePath(res.filePath)}::${res.title.toLowerCase().trim()}`, res);
+    allResolvedMap.set(res.id || `${normalizePath(res.filePath)}::${res.title.toLowerCase().trim()}`, res);
   }
 
   return Array.from(allResolvedMap.values());
