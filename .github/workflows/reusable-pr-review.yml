@@ -42,7 +42,7 @@ jobs:
         with:
           repository: RohitKeshavala/PR_Review_Bot # Replace with your central repo or organization
           path: .pr-bot-runner
-          ref: feat-main
+          ref: feat-bot-main
 
       # 3. Setup Node.js to run the bot
       - name: Setup Node.js
