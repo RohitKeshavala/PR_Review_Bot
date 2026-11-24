@@ -174,6 +174,12 @@ Options:
 
 ---
 
+## 📖 In-Depth Guides & Documentation
+
+- [Review Flow, Lifecycle & Verification Guide](file:///d:/My_Tasks/AI_Agent_Skills_Learning/PR_Review_Bot/PR_REVIEW_FLOW_GUIDE.md): Comprehensive documentation covering in-place updates, review dismissal, comment lifecycle (outdated vs. deleted), defect matching, and the complete manual test suite.
+
+---
+
 ## 📜 License
 MIT License. Built for autonomous continuous integration workflows.
 

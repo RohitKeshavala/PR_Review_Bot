@@ -617,16 +617,7 @@ export function isSameDefect(
     id?: string;
   },
 ): boolean {
-  // 1. Explicit ID check:
-  if (a.id && b.id) {
-    if (a.id === b.id) {
-      return true;
-    }
-    // If both have explicit, distinct tracking IDs (e.g. 'defect-1' vs 'defect-2'), they are different defects
-    return false;
-  }
-
-  // 2. Normalized file path comparison (case-insensitive & cross-platform)
+  // 1. Normalized file path comparison (case-insensitive & cross-platform)
   const pathA = normalizePath(a.filePath).toLowerCase();
   const pathB = normalizePath(b.filePath).toLowerCase();
   const pathsMatch =
@@ -642,86 +633,63 @@ export function isSameDefect(
   const startB = b.lineNumber ?? 0;
   const endB = b.endLineNumber && b.endLineNumber >= startB ? b.endLineNumber : startB;
 
-  // 3. Exact line match or overlapping line ranges in the same file
-  if (startA > 0 && startB > 0) {
-    // Exact same start line or overlapping multi-line replacement ranges
-    if (startA === startB || (startA <= endB && startB <= endA)) {
-      return true;
-    }
+  // Title similarity analysis
+  const cleanTitleA = (a.title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const cleanTitleB = (b.title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const exactTitleMatch =
+    Boolean(cleanTitleA && cleanTitleB) &&
+    (cleanTitleA === cleanTitleB || cleanTitleA.includes(cleanTitleB) || cleanTitleB.includes(cleanTitleA));
 
-    // Direct line proximity (within 5 lines) in the same file
-    if (Math.abs(startA - startB) <= 5) {
-      return true;
-    }
+  const stopWords = new Set([
+    'the', 'and', 'for', 'with', 'that', 'this', 'from', 'issue', 'defect',
+    'detected', 'bug', 'error', 'warning', 'problem', 'missing', 'failed',
+    'invalid', 'check', 'line', 'code', 'flaw',
+  ]);
+  const wordsA = new Set(
+    (a.title || '')
+      .toLowerCase()
+      .split(/\W+/)
+      .filter((w) => w.length >= 3 && !stopWords.has(w)),
+  );
+  const wordsB = new Set(
+    (b.title || '')
+      .toLowerCase()
+      .split(/\W+/)
+      .filter((w) => w.length >= 3 && !stopWords.has(w)),
+  );
+  const commonWords = [...wordsA].filter((w) => wordsB.has(w));
 
-    // Line shift within 15 lines with matching category
-    if (Math.abs(startA - startB) <= 15) {
-      if (a.category && b.category && a.category.toLowerCase() === b.category.toLowerCase()) {
-        return true;
-      }
+  // 2. Exact same start line in the same file
+  if (startA > 0 && startB > 0 && startA === startB) {
+    return true;
+  }
+
+  // 3. Overlapping replacement line ranges in the same file
+  if (startA > 0 && startB > 0 && (startA <= endB && startB <= endA)) {
+    // If both have titles and their titles have completely disjoint domain keywords, do not false-merge
+    if (wordsA.size > 0 && wordsB.size > 0 && commonWords.length === 0 && !exactTitleMatch) {
+      return false;
+    }
+    return true;
+  }
+
+  // 4. Line proximity (within 5 lines) with at least 1 common domain word or title match
+  if (startA > 0 && startB > 0 && Math.abs(startA - startB) <= 5) {
+    if (exactTitleMatch || commonWords.length >= 1) {
+      return true;
     }
   }
 
-  // 4. Title similarity matching (resilient to LLM rephrasing)
-  const titleA = (a.title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  const titleB = (b.title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-
-  if (titleA && titleB) {
-    if (titleA === titleB || titleA.includes(titleB) || titleB.includes(titleA)) {
-      if (startA > 0 && startB > 0) {
-        if (Math.abs(startA - startB) <= 25) {
-          return true;
-        }
-      } else {
-        return true;
-      }
-    }
-
-    const stopWords = new Set([
-      'the',
-      'and',
-      'for',
-      'with',
-      'that',
-      'this',
-      'from',
-      'issue',
-      'defect',
-      'detected',
-      'bug',
-      'error',
-      'warning',
-      'problem',
-      'missing',
-      'failed',
-      'invalid',
-      'check',
-    ]);
-    const wordsA = new Set(
-      (a.title || '')
-        .toLowerCase()
-        .split(/\W+/)
-        .filter((w) => w.length >= 3 && !stopWords.has(w)),
-    );
-    const wordsB = new Set(
-      (b.title || '')
-        .toLowerCase()
-        .split(/\W+/)
-        .filter((w) => w.length >= 3 && !stopWords.has(w)),
-    );
-    const common = [...wordsA].filter((w) => wordsB.has(w));
-    if (common.length >= 2) {
-      if (startA > 0 && startB > 0) {
-        if (Math.abs(startA - startB) <= 20) {
-          return true;
-        }
-      } else {
-        return true;
-      }
-    }
-    if (common.length >= 1 && startA > 0 && startB > 0 && Math.abs(startA - startB) <= 10) {
+  // 5. Line shift (within 35 lines) with significant title match
+  if (startA > 0 && startB > 0 && Math.abs(startA - startB) <= 35) {
+    if (exactTitleMatch || commonWords.length >= 2) {
       return true;
     }
+  }
+
+  // 6. Strong title match across larger line shifts (within 60 lines)
+  if (exactTitleMatch && startA > 0 && startB > 0 && Math.abs(startA - startB) <= 60) {
+    return true;
   }
 
   return false;

@@ -161,6 +161,7 @@ export async function submitPullRequestReview(
     pull_request_review_id: number | null;
     path?: string;
     line?: number;
+    start_line?: number | null;
     position?: number | null;
   }> = [];
   try {
@@ -205,7 +206,7 @@ export async function submitPullRequestReview(
       const commentPath = c.path ? normalizePath(c.path) : '';
       return isSameDefect(
         { filePath: f.path, lineNumber: f.line, endLineNumber: f.line },
-        { filePath: commentPath, lineNumber: c.line || 0, endLineNumber: c.line || 0 },
+        { filePath: commentPath, lineNumber: c.start_line || c.line || 0, endLineNumber: c.line || 0 },
       );
     });
 
@@ -262,7 +263,7 @@ export async function submitPullRequestReview(
         const commentPath = c.path ? normalizePath(c.path) : '';
         const commentFinding = {
           filePath: commentPath,
-          lineNumber: c.line || 0,
+          lineNumber: c.start_line || c.line || 0,
           endLineNumber: c.line || 0,
         };
 
