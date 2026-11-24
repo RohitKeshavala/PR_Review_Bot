@@ -13,6 +13,7 @@ import {
   fetchRemotePullRequestDiff,
   parseRepoString,
   postNewInlineComments,
+  submitPullRequestReviewVerdict,
   syncQualityGateStickyComment,
   updateResolvedInlineComments,
 } from './github-service.js';
@@ -173,7 +174,18 @@ program
         if (config.githubRepository && config.prNumber) {
           const { owner, repo } = parseRepoString(config.githubRepository);
 
-          // 8a. Update resolved comments directly with 'Resolved in <commit>' (Option A)
+          // 8a. Update or create the single persistent Quality Gate comment on the PR issue FIRST.
+          // On First review, creating this before inline comments ensures it stays at the top of the PR thread.
+          await syncQualityGateStickyComment(
+            config.githubToken || '',
+            owner,
+            repo,
+            config.prNumber,
+            markdownOutput,
+            config.dryRun,
+          );
+
+          // 8b. Update resolved comments directly with 'Resolved in <commit>' (Option A)
           if (resolvedResolutions.length > 0) {
             await updateResolvedInlineComments(
               config.githubToken || '',
@@ -186,7 +198,7 @@ program
             );
           }
 
-          // 8b. Create new inline comments for brand-new findings
+          // 8c. Create new inline comments for brand-new findings (added AFTER the top comment)
           if (newFindings.length > 0) {
             await postNewInlineComments(
               config.githubToken || '',
@@ -199,13 +211,14 @@ program
             );
           }
 
-          // 8c. Update or create the single persistent Quality Gate comment on the PR issue
-          await syncQualityGateStickyComment(
+          // 8d. Submit formal GitHub Pull Request Review verdict (APPROVE / CHANGES_REQUESTED / COMMENT)
+          await submitPullRequestReviewVerdict(
             config.githubToken || '',
             owner,
             repo,
             config.prNumber,
-            markdownOutput,
+            config.commitSha || '',
+            report,
             config.dryRun,
           );
         } else if (config.postToGitHub) {

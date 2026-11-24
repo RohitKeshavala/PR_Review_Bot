@@ -12,6 +12,7 @@ import type {
   BotReviewComment,
   FindingCategory,
   PRFinding,
+  PRReviewReport,
   ResolvedCommentResolution,
   Severity,
 } from './types.js';
@@ -377,5 +378,164 @@ export async function syncQualityGateStickyComment(
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`⚠️ Warning: Failed to sync Quality Gate sticky comment: ${msg}`);
+  }
+}
+
+/**
+ * Submits a formal GitHub Pull Request Review verdict (APPROVE / CHANGES_REQUESTED / COMMENT).
+ * This ensures the GitHub review status, verdict badge, and reviewer state are properly registered.
+ */
+export async function submitPullRequestReviewVerdict(
+  token: string,
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  commitSha: string,
+  report: PRReviewReport,
+  dryRun = false,
+): Promise<void> {
+  let targetEvent: 'REQUEST_CHANGES' | 'APPROVE' | 'COMMENT';
+  if (report.verdict === 'CHANGES_REQUESTED') {
+    targetEvent = 'REQUEST_CHANGES';
+  } else if (report.verdict === 'APPROVE') {
+    targetEvent = 'APPROVE';
+  } else {
+    targetEvent = 'COMMENT';
+  }
+
+  const verdictText =
+    report.verdict === 'APPROVE'
+      ? '✅ **APPROVE** (Ready to merge)'
+      : report.verdict === 'APPROVE_WITH_COMMENTS'
+        ? '⚠️ **APPROVE WITH COMMENTS**'
+        : '❌ **CHANGES REQUESTED** (Merge blocked)';
+
+  let reviewBody = `### AI PR Review Verdict: ${verdictText}\n\n`;
+  reviewBody += `${report.summary}\n\n`;
+
+  const blockers = report.findings.filter(
+    (f) => f.severity === 'CRITICAL' || f.severity === 'HIGH' || f.severity === 'MEDIUM',
+  );
+  if (blockers.length > 0) {
+    reviewBody += `* **Active Blockers:** ${blockers.length} issue(s) must be fixed before merge.\n`;
+  }
+  if (report.resolvedFindings && report.resolvedFindings.length > 0) {
+    reviewBody += `* **Resolved Issues:** ${report.resolvedFindings.length} issue(s) verified resolved.\n`;
+  }
+  reviewBody += `\n*See the persistent Quality Gate status comment at the top of the PR conversation and inline code comments for full details.*`;
+
+  if (dryRun) {
+    console.log(
+      `[DRY-RUN] Would submit GitHub PR Review (${targetEvent}) on commit ${commitSha || 'latest'}.`,
+    );
+    return;
+  }
+
+  const octokit = getOctokitClient(token);
+
+  let currentLogin = 'github-actions[bot]';
+  try {
+    const userResp = await octokit.rest.users.getAuthenticated();
+    if (userResp.data?.login) {
+      currentLogin = userResp.data.login;
+    }
+  } catch {
+    // Default to github-actions[bot]
+  }
+
+  const targetStateMap: Record<string, string> = {
+    REQUEST_CHANGES: 'CHANGES_REQUESTED',
+    APPROVE: 'APPROVED',
+    COMMENT: 'COMMENTED',
+  };
+  const expectedState = targetStateMap[targetEvent] || 'COMMENTED';
+
+  let existingBotReviews: Array<{ id: number; state: string; commit_id?: string | null }> = [];
+  try {
+    const reviewsResp = await octokit.rest.pulls.listReviews({
+      owner,
+      repo,
+      pull_number: pullNumber,
+      per_page: 100,
+    });
+
+    existingBotReviews = reviewsResp.data.filter(
+      (r) =>
+        r.user?.login === currentLogin ||
+        r.user?.login === 'github-actions[bot]' ||
+        Boolean(r.user?.login?.endsWith('[bot]')),
+    );
+  } catch (listErr: unknown) {
+    const msg = listErr instanceof Error ? listErr.message : String(listErr);
+    console.warn(`⚠️ Warning: Could not list existing PR reviews: ${msg}`);
+  }
+
+  const latestReview =
+    existingBotReviews.length > 0 ? existingBotReviews[existingBotReviews.length - 1] : undefined;
+
+  // If a review already exists and state matches, update the existing review in-place
+  if (latestReview && latestReview.state === expectedState) {
+    try {
+      console.log(
+        `Updating existing PR Review (ID: ${latestReview.id}, State: ${latestReview.state}) body...`,
+      );
+      await octokit.rest.pulls.updateReview({
+        owner,
+        repo,
+        pull_number: pullNumber,
+        review_id: latestReview.id,
+        body: reviewBody,
+      });
+      console.log(`✔ Successfully updated PR Review (ID: ${latestReview.id}) in-place.`);
+      return;
+    } catch (updateErr: unknown) {
+      const msg = updateErr instanceof Error ? updateErr.message : String(updateErr);
+      console.warn(
+        `⚠️ Warning: Could not update existing review (ID: ${latestReview.id}): ${msg}. Submitting new review instead.`,
+      );
+    }
+  }
+
+  // Otherwise, submit a new formal review (first review, state changed, or update fallback)
+  const submitReview = async (eventToSubmit: 'REQUEST_CHANGES' | 'APPROVE' | 'COMMENT') => {
+    const params: {
+      owner: string;
+      repo: string;
+      pull_number: number;
+      event: 'REQUEST_CHANGES' | 'APPROVE' | 'COMMENT';
+      body: string;
+      commit_id?: string;
+    } = {
+      owner,
+      repo,
+      pull_number: pullNumber,
+      event: eventToSubmit,
+      body: reviewBody,
+    };
+    if (commitSha) {
+      params.commit_id = commitSha;
+    }
+    return await octokit.rest.pulls.createReview(params);
+  };
+
+  try {
+    console.log(`Submitting formal PR Review (${targetEvent}) on commit ${commitSha || 'latest'}...`);
+    const res = await submitReview(targetEvent);
+    console.log(`✔ Successfully submitted PR Review (ID: ${res.data.id}, Event: ${targetEvent}).`);
+  } catch (primaryErr: unknown) {
+    const msg = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
+    console.warn(`⚠️ Warning: Could not submit review as ${targetEvent}: ${msg}`);
+
+    // If APPROVE or REQUEST_CHANGES failed (e.g. permissions, reviewing own PR), fallback to COMMENT
+    if (targetEvent !== 'COMMENT') {
+      try {
+        console.log(`Retrying review submission as COMMENT...`);
+        const fallbackRes = await submitReview('COMMENT');
+        console.log(`✔ Gracefully submitted PR Review as COMMENT (ID: ${fallbackRes.data.id}).`);
+      } catch (fallbackErr: unknown) {
+        const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+        console.warn(`⚠️ Warning: Fallback review submission as COMMENT also failed: ${fallbackMsg}`);
+      }
+    }
   }
 }

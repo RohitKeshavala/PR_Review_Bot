@@ -252,6 +252,13 @@ export function toQualityGateMarkdown(report: PRReviewReport): string {
     ? `### ❌ AI quality gate: not ready to merge`
     : `### ✅ AI quality gate: good to merge`;
 
+  const verdictBadge =
+    report.verdict === 'APPROVE'
+      ? '✅ **APPROVE** (Ready to merge)'
+      : report.verdict === 'APPROVE_WITH_COMMENTS'
+        ? '⚠️ **APPROVE WITH COMMENTS**'
+        : '❌ **CHANGES REQUESTED** (Merge blocked)';
+
   const summary = isBlocked
     ? `${report.indicators.blockerCount} blocker(s) identified. Merge must be blocked.`
     : `All checks passed. Ready to merge.`;
@@ -264,6 +271,7 @@ export function toQualityGateMarkdown(report: PRReviewReport): string {
 
   let md = `${QUALITY_GATE_STICKY_MARKER}\n`;
   md += `${header}\n\n`;
+  md += `**Verdict:** ${verdictBadge}\n\n`;
   md += `${summary}\n\n`;
 
   // Tech stack & environment callout

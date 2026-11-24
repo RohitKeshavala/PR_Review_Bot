@@ -41,14 +41,15 @@ flowchart TD
     PartitionOutput --> StillActiveList["Still-Active Comments<br/>(No new comments created)"]
     PartitionOutput --> BrandNewFindings["Brand-New Findings<br/>(newFindings)"]
     
-    ResolvedList --> UpdateInline["6A. Update Resolved Comments Directly (Option A):<br/>octokit.rest.pulls.updateReviewComment<br/>Adds '✅ Resolved in &lt;commit&gt;' + fix diff"]
-    BrandNewFindings --> PostNewInline["6B. Post New Inline Comments:<br/>octokit.rest.pulls.createReviewComment<br/>Attaches at start_line..line with structural check"]
-    
-    UpdateInline --> SyncQualityGate["7. Sync Persistent Quality Gate Comment:<br/>octokit.rest.issues.updateComment<br/>Updates blockers, environment, resolved list, commit SHA"]
-    PostNewInline --> SyncQualityGate
+    ResolvedList --> SyncQualityGate["6A. Sync Persistent Quality Gate Comment FIRST:<br/>octokit.rest.issues.createComment / updateComment<br/>Created first so it stays at the top of the PR thread"]
     StillActiveList --> SyncQualityGate
+    BrandNewFindings --> SyncQualityGate
+
+    SyncQualityGate --> UpdateInline["6B. Update Resolved Comments Directly (Option A):<br/>octokit.rest.pulls.updateReviewComment<br/>Adds '✅ Resolved in &lt;commit&gt;' + fix diff"]
+    UpdateInline --> PostNewInline["6C. Post New Inline Comments:<br/>octokit.rest.pulls.createReviewComment<br/>Attaches at start_line..line after top comment"]
+    PostNewInline --> SubmitVerdict["6D. Submit Formal PR Review Verdict:<br/>octokit.rest.pulls.createReview / updateReview<br/>Registers verdict badge on GitHub (REQUEST_CHANGES / APPROVE)"]
     
-    SyncQualityGate --> GateCheck{"--fail-on-changes?<br/>Blocker Count > 0?"}
+    SubmitVerdict --> GateCheck{"--fail-on-changes?<br/>Blocker Count > 0?"}
     GateCheck -- "YES" --> FailCI["Exit Code 1 (Check Red, Blocks Merge)"]
     GateCheck -- "NO" --> PassCI["Exit Code 0 (Check Green, Ready to Merge)"]
 ```
@@ -62,6 +63,8 @@ On the PR conversation tab, the bot maintains a single sticky Quality Gate statu
 ### Example (Active Blockers):
 ```markdown
 ### ❌ AI quality gate: not ready to merge
+
+**Verdict:** ❌ **CHANGES REQUESTED** (Merge blocked)
 
 2 blocker(s) identified. Merge must be blocked.
 
@@ -86,6 +89,8 @@ On the PR conversation tab, the bot maintains a single sticky Quality Gate statu
 ### Example (All Checks Passed):
 ```markdown
 ### ✅ AI quality gate: good to merge
+
+**Verdict:** ✅ **APPROVE** (Ready to merge)
 
 All checks passed. Ready to merge.
 
