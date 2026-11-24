@@ -15,6 +15,8 @@ export interface CliOptions {
   dryRun?: boolean;
   failOnChanges?: boolean;
   output?: string;
+  commit?: string;
+  runUrl?: string;
 }
 
 /**
@@ -39,12 +41,20 @@ export function loadConfig(cliOptions: CliOptions = {}): AppConfig {
       ? Number.parseInt(env.PR_NUMBER, 10)
       : undefined;
 
+  const repo = cliOptions.repo || env.GITHUB_REPOSITORY;
+  const commitSha = cliOptions.commit || env.COMMIT_SHA || env.GITHUB_SHA;
+
+  let runUrl = cliOptions.runUrl;
+  if (!runUrl && env.GITHUB_SERVER_URL && repo && env.GITHUB_RUN_ID) {
+    runUrl = `${env.GITHUB_SERVER_URL}/${repo}/actions/runs/${env.GITHUB_RUN_ID}`;
+  }
+
   const config: AppConfig = {
     geminiApiKey: env.GEMINI_API_KEY,
     geminiModel: env.GEMINI_MODEL,
     geminiFallbackModel: env.GEMINI_FALLBACK_MODEL,
     githubToken: env.GITHUB_TOKEN || env.GH_TOKEN,
-    githubRepository: cliOptions.repo || env.GITHUB_REPOSITORY,
+    githubRepository: repo,
     targetProjectPath,
     dryRun,
     outputReportPath: cliOptions.output || env.OUTPUT_REPORT_PATH || './PR_REVIEW_REPORT.md',
@@ -53,6 +63,9 @@ export function loadConfig(cliOptions: CliOptions = {}): AppConfig {
     headBranch: cliOptions.head || env.HEAD_BRANCH,
     prNumber,
     postToGitHub,
+    commitSha,
+    shortCommitSha: commitSha ? commitSha.slice(0, 7) : undefined,
+    runUrl,
   };
 
   return config;

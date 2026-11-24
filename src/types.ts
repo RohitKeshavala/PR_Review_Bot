@@ -15,8 +15,6 @@ export type FindingCategory =
 
 export type ReviewVerdict = 'APPROVE' | 'APPROVE_WITH_COMMENTS' | 'CHANGES_REQUESTED';
 
-export type ReviewGrade = 'A+' | 'A' | 'B' | 'C' | 'D' | 'F';
-
 export type DiffChangeType = 'add' | 'del' | 'context';
 
 export interface ChangedLine {
@@ -46,6 +44,7 @@ export interface FileDiff {
 
 export interface PRFinding {
   id?: string;
+  commentId?: number;
   filePath: string;
   lineNumber: number;
   endLineNumber?: number;
@@ -60,6 +59,7 @@ export interface PRFinding {
 
 export interface ResolvedFinding {
   id?: string;
+  commentId?: number;
   filePath: string;
   lineNumber?: number;
   endLineNumber?: number;
@@ -67,7 +67,36 @@ export interface ResolvedFinding {
   severity: Severity;
   category: FindingCategory;
   explanation?: string;
+  fixDiffSnippet?: string;
+  resolvedInCommit?: string;
   resolvedAt?: string;
+}
+
+export interface BotReviewComment {
+  id: number;
+  path: string;
+  line: number;
+  start_line?: number;
+  body: string;
+  title: string;
+  problem: string;
+  severity: Severity;
+  category: FindingCategory;
+  status: 'active' | 'resolved';
+  resolvedInCommit?: string;
+}
+
+export interface ResolvedCommentResolution {
+  commentId: number;
+  explanation: string;
+  fixDiffSnippet?: string;
+}
+
+export interface QualityGateIndicators {
+  reviews: 'pass' | 'fail';
+  tests: 'pass' | 'warn';
+  observability: 'pass' | 'warn';
+  blockerCount: number;
 }
 
 export interface PRReviewStats {
@@ -82,13 +111,15 @@ export interface PRReviewStats {
 }
 
 export interface PRReviewReport {
-  healthScore: number;
-  grade: ReviewGrade;
   verdict: ReviewVerdict;
   summary: string;
+  commitSha: string;
+  shortCommitSha: string;
+  runUrl?: string;
   stats: PRReviewStats;
   findings: PRFinding[];
-  resolvedFindings?: ResolvedFinding[];
+  resolvedFindings: ResolvedFinding[];
+  indicators: QualityGateIndicators;
   detectedLanguages?: string[];
   detectedFrameworks?: string[];
   targetPath?: string;
@@ -108,15 +139,6 @@ export interface ReviewComment {
   body: string;
 }
 
-export interface ReviewPayload {
-  owner: string;
-  repo: string;
-  pull_number: number;
-  event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
-  body: string;
-  comments?: ReviewComment[];
-}
-
 export interface AppConfig {
   geminiApiKey?: string;
   geminiModel?: string;
@@ -131,5 +153,7 @@ export interface AppConfig {
   headBranch?: string;
   prNumber?: number;
   postToGitHub: boolean;
+  commitSha?: string;
+  shortCommitSha?: string;
+  runUrl?: string;
 }
-

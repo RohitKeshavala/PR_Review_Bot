@@ -1,34 +1,38 @@
 #!/usr/bin/env node
 
+import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Command } from 'commander';
 import { loadConfig, validateConfig } from './config.js';
 import { buildReviewContext } from './context-builder.js';
-import { toConsole, toGitHubMarkdown } from './formatter.js';
+import { toConsole, toQualityGateMarkdown } from './formatter.js';
 import {
-  extractReviewStateFromFile,
-  fetchPreviousReviewState,
+  fetchExistingBotReviewComments,
+  fetchPullRequestHeadCommit,
   fetchRemotePullRequestDiff,
   parseRepoString,
-  postOrUpdateStickyComment,
-  submitPullRequestReview,
+  postNewInlineComments,
+  syncQualityGateStickyComment,
+  updateResolvedInlineComments,
 } from './github-service.js';
 import { getDiff, parseDiff } from './git-service.js';
 import { performAIReview } from './reviewer.js';
-import type { FileDiff, PRFinding, ResolvedFinding } from './types.js';
+import type { BotReviewComment, FileDiff } from './types.js';
 
 const program = new Command();
 
 program
   .name('pr-review-bot')
   .description('Autonomous polyglot AI PR Review Bot powered by Google Gemini and GitHub Actions')
-  .version('1.0.0')
+  .version('2.0.0')
   .option('-t, --target <path>', 'Target project path', '.')
   .option('-b, --base <branch>', 'Base branch for local diff')
   .option('--head <branch>', 'Head branch for local diff')
   .option('-p, --pr <number>', 'GitHub PR number')
   .option('--repo <owner/repo>', 'GitHub repository (owner/repo)')
+  .option('--commit <sha>', 'Commit SHA being reviewed')
+  .option('--run-url <url>', 'GitHub Actions workflow run URL')
   .option('--post-to-github', 'Submit live review via Octokit')
   .option('--dry-run', 'Simulate review and save local payload JSON')
   .option('--fail-on-changes', 'Exit code 1 on CHANGES_REQUESTED (CI gate)')
@@ -46,31 +50,65 @@ program
         process.exit(1);
       }
 
-      console.log('🚀 Initializing Universal AI PR Review Bot...');
+      console.log('🚀 Initializing AI PR Quality Gate...');
       console.log(`   Target Directory: ${config.targetProjectPath}`);
       console.log(`   AI Engine:        Google Gemini (Dynamic Fallback Chain)`);
       console.log(`   Mode:             ${config.dryRun ? 'DRY-RUN (Simulation)' : 'LIVE'}`);
 
-      // 1. Acquire diff (Remote PR diff if available and requested, otherwise local git diff)
+      // 1. Acquire diff & commit SHA
       let rawDiff = '';
-      if (config.prNumber && config.githubRepository && config.githubToken && config.postToGitHub) {
-        try {
-          const { owner, repo } = parseRepoString(config.githubRepository);
-          console.log(`📥 Fetching remote diff for ${owner}/${repo}#${config.prNumber} from GitHub API...`);
-          rawDiff = await fetchRemotePullRequestDiff(
+      if (config.prNumber && config.githubRepository && config.githubToken) {
+        const { owner, repo } = parseRepoString(config.githubRepository);
+
+        // Fetch PR head commit SHA if not explicitly provided
+        if (!config.commitSha) {
+          const { commitSha } = await fetchPullRequestHeadCommit(
             config.githubToken,
             owner,
             repo,
             config.prNumber,
           );
-        } catch (fetchErr) {
-          console.warn(`⚠️ Could not fetch remote diff via GitHub API, falling back to local git diff: ${fetchErr}`);
+          if (commitSha) {
+            config.commitSha = commitSha;
+          }
+        }
+
+        if (config.postToGitHub) {
+          try {
+            console.log(`📥 Fetching remote diff for ${owner}/${repo}#${config.prNumber} from GitHub API...`);
+            rawDiff = await fetchRemotePullRequestDiff(
+              config.githubToken,
+              owner,
+              repo,
+              config.prNumber,
+            );
+          } catch (fetchErr) {
+            console.warn(`⚠️ Could not fetch remote diff via GitHub API, falling back to local git diff: ${fetchErr}`);
+            rawDiff = getDiff(config.baseBranch, config.headBranch, config.targetProjectPath);
+          }
+        } else {
           rawDiff = getDiff(config.baseBranch, config.headBranch, config.targetProjectPath);
         }
       } else {
         console.log(`🔍 Extracting local git diff in ${config.targetProjectPath}...`);
         rawDiff = getDiff(config.baseBranch, config.headBranch, config.targetProjectPath);
       }
+
+      // Fallback local commit SHA if not yet set
+      if (!config.commitSha) {
+        try {
+          config.commitSha = execSync('git rev-parse HEAD', {
+            cwd: config.targetProjectPath,
+            encoding: 'utf-8',
+          }).trim();
+        } catch {
+          config.commitSha = 'latest';
+        }
+      }
+
+      const shortCommitSha = config.commitSha ? config.commitSha.slice(0, 7) : 'latest';
+      config.shortCommitSha = shortCommitSha;
+      console.log(`📌 Reviewed Commit SHA: ${shortCommitSha}`);
 
       // 2. Parse diff
       const fileDiffs: FileDiff[] = parseDiff(rawDiff);
@@ -83,103 +121,111 @@ program
         console.log(`🎯 Detected Frameworks: ${context.detectedFrameworks.join(', ')}`);
       }
 
-      // 4. Fetch previous review state to verify active defects across review rounds
-      let previousState = {
-        previousFindings: [] as PRFinding[],
-        previouslyResolved: [] as ResolvedFinding[],
-      };
+      // 4. Fetch existing review comments from Octokit (Active vs Resolved)
+      let activeComments: BotReviewComment[] = [];
+      let resolvedComments: BotReviewComment[] = [];
 
       if (config.prNumber && config.githubRepository && config.githubToken) {
-        try {
-          const { owner, repo } = parseRepoString(config.githubRepository);
-          previousState = await fetchPreviousReviewState(
-            config.githubToken,
-            owner,
-            repo,
-            config.prNumber,
-          );
-        } catch (fetchPrevErr) {
-          console.warn(`⚠️ Warning: Could not fetch previous review state from GitHub: ${fetchPrevErr}`);
-        }
-      } else {
-        const localReportPath = path.resolve(process.cwd(), config.outputReportPath);
-        previousState = extractReviewStateFromFile(localReportPath);
-      }
-
-      if (previousState.previousFindings.length > 0) {
-        console.log(`📋 Found ${previousState.previousFindings.length} active defect(s) from previous review to verify.`);
+        const { owner, repo } = parseRepoString(config.githubRepository);
+        console.log(`🔎 Fetching existing PR review comments for ${owner}/${repo}#${config.prNumber}...`);
+        const commentData = await fetchExistingBotReviewComments(
+          config.githubToken,
+          owner,
+          repo,
+          config.prNumber,
+        );
+        activeComments = commentData.activeComments;
+        resolvedComments = commentData.resolvedComments;
+        console.log(
+          `📋 Found ${activeComments.length} active comment(s) and ${resolvedComments.length} resolved comment(s).`,
+        );
       }
 
       // 5. Perform AI Review Reasoning with Semantic Defect Verification
       console.log('✨ Performing AI review analysis with Google Gemini...');
-      const report = await performAIReview(
+      const { report, newFindings, resolvedResolutions } = await performAIReview(
         context,
         config,
-        previousState.previousFindings,
-        previousState.previouslyResolved,
+        activeComments,
+        resolvedComments,
       );
 
-      if (report.resolvedFindings && report.resolvedFindings.length > 0) {
-        console.log(`✅ Tracked ${report.resolvedFindings.length} resolved defect(s) across review rounds.`);
+      console.log(`📊 Review Verdict: ${report.verdict} (${report.indicators.blockerCount} blocker(s))`);
+      if (resolvedResolutions.length > 0) {
+        console.log(`✅ Verified ${resolvedResolutions.length} previously reported defect(s) now resolved!`);
+      }
+      if (newFindings.length > 0) {
+        console.log(`🚨 Identified ${newFindings.length} brand-new finding(s).`);
       }
 
       // 6. Format and display console output
       const consoleOutput = toConsole(report);
       console.log(consoleOutput);
 
-      // 6. Write Markdown Report
-      const markdownOutput = toGitHubMarkdown(report);
+      // 7. Write Markdown Report
+      const markdownOutput = toQualityGateMarkdown(report);
       const outputPath = path.resolve(process.cwd(), config.outputReportPath);
       fs.writeFileSync(outputPath, markdownOutput, 'utf-8');
-      console.log(`📄 Markdown report saved to: ${outputPath}`);
+      console.log(`📄 Quality Gate markdown report saved to: ${outputPath}`);
 
-      // 7. Post to GitHub if requested or simulate if dry-run
+      // 8. Post to GitHub (Option A) or simulate if dry-run
       if (config.postToGitHub || config.dryRun) {
         if (config.githubRepository && config.prNumber) {
           const { owner, repo } = parseRepoString(config.githubRepository);
 
-          // Submit formal PR Review (with inline comments and in-place updates)
-          const reviewSubmitted = await submitPullRequestReview(
-            config.githubToken || '',
-            owner,
-            repo,
-            config.prNumber,
-            report,
-            markdownOutput,
-            config.dryRun,
-            previousState.previouslyResolved,
-          );
+          // 8a. Update resolved comments directly with 'Resolved in <commit>' (Option A)
+          if (resolvedResolutions.length > 0) {
+            await updateResolvedInlineComments(
+              config.githubToken || '',
+              owner,
+              repo,
+              resolvedResolutions,
+              activeComments,
+              shortCommitSha,
+              config.dryRun,
+            );
+          }
 
-          // Update sticky summary comment if an existing one is already present
-          // (or if review submission was skipped/failed)
-          await postOrUpdateStickyComment(
+          // 8b. Create new inline comments for brand-new findings
+          if (newFindings.length > 0) {
+            await postNewInlineComments(
+              config.githubToken || '',
+              owner,
+              repo,
+              config.prNumber,
+              config.commitSha,
+              newFindings,
+              config.dryRun,
+            );
+          }
+
+          // 8c. Update or create the single persistent Quality Gate comment on the PR issue
+          await syncQualityGateStickyComment(
             config.githubToken || '',
             owner,
             repo,
             config.prNumber,
             markdownOutput,
             config.dryRun,
-            reviewSubmitted,
           );
         } else if (config.postToGitHub) {
           console.warn('⚠️ --post-to-github specified but repository or PR number was not provided.');
         }
       }
 
-      // 8. CI Gate evaluation
+      // 9. CI Gate evaluation
       if (config.failOnChanges && report.verdict === 'CHANGES_REQUESTED') {
         console.error('❌ CI Gate Failed: Review verdict is CHANGES_REQUESTED.');
         process.exit(1);
       }
 
-      console.log('✔ Review bot finished successfully.');
+      console.log('✔ AI Quality Gate finished successfully.');
       process.exit(0);
     } catch (err: unknown) {
-      console.error('\n❌ Fatal error running Universal PR Review Bot:');
+      console.error('\n❌ Fatal error running AI PR Quality Gate:');
       console.error(err instanceof Error ? err.stack || err.message : String(err));
       process.exit(1);
     }
   });
 
 program.parse(process.argv);
-

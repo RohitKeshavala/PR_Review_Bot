@@ -1,4 +1,9 @@
-import type { PRFinding, PRReviewReport, ReviewVerdict, Severity } from './types.js';
+import type {
+  PRFinding,
+  PRReviewReport,
+  ResolvedCommentResolution,
+  Severity,
+} from './types.js';
 
 // ANSI escape sequences for terminal output
 const colors = {
@@ -17,147 +22,102 @@ const colors = {
   bgYellow: '\x1b[43m',
 };
 
-/**
- * Returns an ANSI colored severity badge for terminal
- */
-function getSeverityColor(sev: Severity): string {
-  switch (sev) {
-    case 'CRITICAL':
-      return `${colors.bgRed}${colors.white}${colors.bold} CRITICAL ${colors.reset}`;
-    case 'HIGH':
-      return `${colors.red}${colors.bold}HIGH${colors.reset}`;
-    case 'MEDIUM':
-      return `${colors.yellow}${colors.bold}MEDIUM${colors.reset}`;
-    case 'LOW':
-      return `${colors.cyan}LOW${colors.reset}`;
-    case 'INFORMATIONAL':
-      return `${colors.dim}INFO${colors.reset}`;
-  }
-}
-
-/**
- * Returns an ANSI colored verdict string
- */
-function getVerdictColor(verdict: ReviewVerdict): string {
-  switch (verdict) {
-    case 'APPROVE':
-      return `${colors.bgGreen}${colors.white}${colors.bold} APPROVED ${colors.reset}`;
-    case 'APPROVE_WITH_COMMENTS':
-      return `${colors.bgYellow}${colors.white}${colors.bold} APPROVE WITH COMMENTS ${colors.reset}`;
-    case 'CHANGES_REQUESTED':
-      return `${colors.bgRed}${colors.white}${colors.bold} CHANGES REQUESTED ${colors.reset}`;
-  }
-}
-
-/**
- * Formats report for terminal / ANSI output
- */
-export function toConsole(report: PRReviewReport): string {
-  const hr = `${colors.dim}${'─'.repeat(70)}${colors.reset}`;
-  const doubleHr = `${colors.bold}${'═'.repeat(70)}${colors.reset}`;
-
-  let out = '\n' + doubleHr + '\n';
-  out += ` ${colors.bold}${colors.cyan}🤖 UNIVERSAL AI PR REVIEW BOT${colors.reset}\n`;
-  out += doubleHr + '\n\n';
-
-  // Overall Score & Verdict
-  out += `  ${colors.bold}Verdict:${colors.reset}       ${getVerdictColor(report.verdict)}\n`;
-  out += `  ${colors.bold}Health Score:${colors.reset}  ${report.healthScore}/100 (Grade: ${colors.bold}${report.grade}${colors.reset})\n`;
-  if (report.detectedLanguages && report.detectedLanguages.length > 0) {
-    out += `  ${colors.bold}Languages:${colors.reset}     ${report.detectedLanguages.join(', ')}\n`;
-  }
-  if (report.detectedFrameworks && report.detectedFrameworks.length > 0) {
-    out += `  ${colors.bold}Frameworks:${colors.reset}    ${colors.cyan}${report.detectedFrameworks.join(', ')}${colors.reset}\n`;
-  }
-  out += `  ${colors.bold}Files Changed:${colors.reset} ${report.stats.filesChanged} (+${report.stats.additions} / -${report.stats.deletions})\n`;
-  out += `  ${colors.bold}Defects:${colors.reset}        Crit: ${report.stats.criticalIssues} | High: ${report.stats.highIssues} | Med: ${report.stats.mediumIssues} | Low: ${report.stats.lowIssues}\n\n`;
-
-  // Summary
-  out += `  ${colors.bold}Summary:${colors.reset}\n`;
-  out += `  ${report.summary.replace(/\n/g, '\n  ')}\n\n`;
-
-  // Findings
-  if (report.findings.length > 0) {
-    out += hr + '\n';
-    out += `  ${colors.bold}Itemized Review Findings (${report.findings.length}):${colors.reset}\n\n`;
-
-    report.findings.forEach((f, idx) => {
-      const lineRange =
-        f.endLineNumber && f.endLineNumber > f.lineNumber
-          ? `${f.filePath}:${f.lineNumber}-${f.endLineNumber}`
-          : `${f.filePath}:${f.lineNumber}`;
-      out += `  ${idx + 1}. [${getSeverityColor(f.severity)}] [${f.category}] ${colors.bold}${f.title}${colors.reset}\n`;
-      out += `     Location: ${lineRange} ${f.inDiffHunk ? `${colors.green}(In Diff Hunk)${colors.reset}` : `${colors.dim}(Outside Diff Hunk)${colors.reset}`}\n`;
-      out += `     Problem:  ${f.problem}\n`;
-      out += `     Impact:   ${f.whyItMatters}\n`;
-      if (f.recommendationDiff) {
-        out += `     Fix:\n       ${colors.dim}${f.recommendationDiff.replace(/\n/g, '\n       ')}${colors.reset}\n`;
-      }
-      out += '\n';
-    });
-  } else {
-    out += `  ${colors.green}✔ No defects identified. Clean PR diff!${colors.reset}\n\n`;
-  }
-
-  // Resolved Defects in console
-  if (report.resolvedFindings && report.resolvedFindings.length > 0) {
-    out += hr + '\n';
-    out += `  ${colors.bold}${colors.green}✅ Resolved Defects (${report.resolvedFindings.length}):${colors.reset}\n\n`;
-    report.resolvedFindings.forEach((rf, idx) => {
-      const lineRange =
-        rf.endLineNumber && rf.endLineNumber > rf.lineNumber!
-          ? `${rf.filePath}:${rf.lineNumber}-${rf.endLineNumber}`
-          : rf.lineNumber
-            ? `${rf.filePath}:${rf.lineNumber}`
-            : rf.filePath;
-      out += `  ${idx + 1}. [${getSeverityColor(rf.severity)}] [${rf.category}] ${rf.title} (${lineRange}) - ${colors.green}RESOLVED${colors.reset}\n`;
-    });
-    out += '\n';
-  }
-
-  out += doubleHr + '\n';
-  return out;
-}
+export const QUALITY_GATE_STICKY_MARKER = '<!-- ai-quality-gate-sticky -->';
+export const INLINE_COMMENT_MARKER_PREFIX = '<!-- ai-review-comment:';
 
 export interface CleanedSuggestion {
   code: string;
-  isRawDiff: boolean;
-  isScopeViolation: boolean;
+  isSafeSuggestion: boolean;
+  reason?: string;
 }
 
 /**
- * Detects if a code suggestion contains class-level members (e.g. private properties,
+ * Checks if code contains unbalanced brackets, braces, or parentheses
+ * that would break structural integrity if committed inline.
+ */
+function isDelimiterBalanced(text: string): boolean {
+  let curly = 0;
+  let paren = 0;
+  let square = 0;
+  let inStr = false;
+  let strChar = '';
+  let isEsc = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+
+    if (isEsc) {
+      isEsc = false;
+      continue;
+    }
+    if (ch === '\\') {
+      isEsc = true;
+      continue;
+    }
+
+    if (inStr) {
+      if (ch === strChar) {
+        inStr = false;
+      }
+      continue;
+    }
+
+    if (ch === '"' || ch === "'" || ch === '`') {
+      inStr = true;
+      strChar = ch;
+      continue;
+    }
+
+    // Ignore single-line comments
+    if (ch === '/' && text[i + 1] === '/') {
+      const nextLine = text.indexOf('\n', i);
+      if (nextLine === -1) break;
+      i = nextLine;
+      continue;
+    }
+
+    if (ch === '{') curly++;
+    else if (ch === '}') curly--;
+    else if (ch === '(') paren++;
+    else if (ch === ')') paren--;
+    else if (ch === '[') square++;
+    else if (ch === ']') square--;
+
+    // Closed before opened
+    if (curly < 0 || paren < 0 || square < 0) {
+      return false;
+    }
+  }
+
+  return curly === 0 && paren === 0 && square === 0;
+}
+
+/**
+ * Detects if code contains class-level members (e.g. private properties,
  * class lifecycle hooks like ngOnInit/ngOnDestroy, or decorators) that would cause
  * syntax errors (e.g. TS1068, TS2393) if applied inline inside a function or method body.
  */
 function checkScopeViolation(text: string): boolean {
-  // 1. Access modifiers on variables/properties (invalid inside function bodies)
   const hasAccessModifiers = /(?:^|\n)\s*(?:private|protected)\s+[a-zA-Z0-9_$]+\s*[:=]/m.test(text);
-
-  // 2. Class decorators like @HostListener or @Input (invalid inside function bodies)
   const hasClassDecorators = /(?:^|\n)\s*@(HostListener|Component|Injectable|Directive|Input|Output)\s*\(/m.test(text);
-
-  // 3. Multi-method or duplicate lifecycle declarations (e.g., ngOnInit() and ngOnDestroy() declared together)
   const hasLifecycleDeclarations =
     /(?:^|\n)\s*(?:public|private|protected)?\s*(?:ngOnInit|ngOnDestroy|componentDidMount|componentWillUnmount)\s*\([^)]*\)\s*(?::\s*[a-zA-Z0-9_$<>[\]]+)?\s*\{/m.test(text);
-
-  const hasMultipleMethods =
-    /\bngOnInit\s*\([^)]*\)[\s\S]*\bngOnDestroy\s*\(/m.test(text);
+  const hasMultipleMethods = /\bngOnInit\s*\([^)]*\)[\s\S]*\bngOnDestroy\s*\(/m.test(text);
 
   return hasAccessModifiers || hasClassDecorators || (hasLifecycleDeclarations && hasMultipleMethods);
 }
 
 /**
- * Cleans recommendation code to ensure it works reliably as a GitHub 1-click suggestion.
- * - Strips outer markdown code fences (```suggestion, ```typescript, etc.)
- * - Identifies and safely handles unified diff notations
- * - Strips diff prefixes ('+', context lines) while preserving exact target indentation
- * - Detects class-level scope violations that cannot be safely applied inline
+ * Cleans recommendation code to ensure structural integrity and prevent broken code:
+ * - Strips outer markdown fences and diff notation headers
+ * - Strips leading + from unified diff lines while preserving indentation
+ * - Validates bracket/brace balance and lexical scope
  */
 export function cleanSuggestionCode(raw: string): CleanedSuggestion {
-  if (!raw) return { code: '', isRawDiff: false, isScopeViolation: false };
+  if (!raw || raw.trim().length === 0) {
+    return { code: '', isSafeSuggestion: false, reason: 'Empty suggestion' };
+  }
 
-  // Strip leading and trailing newlines, but preserve indentation on lines
   let text = raw.replace(/^[\r\n]+/, '').replace(/[\r\n\s]+$/, '');
 
   // Strip outer markdown code blocks if the AI model included them
@@ -168,8 +128,7 @@ export function cleanSuggestionCode(raw: string): CleanedSuggestion {
   // Count hunk headers (@@ -... @@)
   const hunkHeaders = text.match(/^@@\s+-\d+/gm) || [];
   if (hunkHeaders.length > 1) {
-    // Contains multiple disjoint diff hunks: unsafe for a single GitHub suggestion block
-    return { code: text, isRawDiff: true, isScopeViolation: false };
+    return { code: text, isSafeSuggestion: false, reason: 'Contains multiple disjoint diff hunks' };
   }
 
   if (hunkHeaders.length === 1) {
@@ -180,84 +139,134 @@ export function cleanSuggestionCode(raw: string): CleanedSuggestion {
   const hasMinus = lines.some((l) => l.startsWith('-'));
   const hasPlus = lines.some((l) => l.startsWith('+'));
 
+  let cleanCode = text;
   if (hasMinus || hasPlus) {
-    // If unified diff notation was used, extract the '+' replacement lines
     const replacementLines: string[] = [];
     for (const line of lines) {
       if (line.startsWith('+')) {
         replacementLines.push(line.replace(/^\+\s?/, ''));
       } else if (!line.startsWith('-')) {
-        // Context line (strip leading space if standard diff format)
         replacementLines.push(line.startsWith(' ') ? line.substring(1) : line);
       }
     }
-    const cleanCode = replacementLines.join('\n');
+    cleanCode = replacementLines.join('\n');
+  }
+
+  if (checkScopeViolation(cleanCode)) {
     return {
       code: cleanCode,
-      isRawDiff: false,
-      isScopeViolation: checkScopeViolation(cleanCode),
+      isSafeSuggestion: false,
+      reason: 'Contains class-level properties or lifecycle methods that cannot be applied inline',
     };
   }
 
-  return {
-    code: text,
-    isRawDiff: false,
-    isScopeViolation: checkScopeViolation(text),
-  };
-}
-
-/**
- * Formats individual finding for GitHub inline diff comment with ```suggestion block
- */
-export function toInlineComment(finding: PRFinding): string {
-  const severityEmojis: Record<Severity, string> = {
-    CRITICAL: '🚨 **[CRITICAL]**',
-    HIGH: '⚠️ **[HIGH]**',
-    MEDIUM: '⚡ **[MEDIUM]**',
-    LOW: '🔍 **[LOW]**',
-    INFORMATIONAL: '💡 **[INFO]**',
-  };
-
-  let body = `${severityEmojis[finding.severity]} **${finding.title}**\n\n`;
-  body += `> **Category**: \`${finding.category}\`\n\n`;
-  body += `**Problem:**\n${finding.problem}\n\n`;
-  body += `**Why It Matters:**\n${finding.whyItMatters}\n\n`;
-
-  if (finding.recommendationDiff !== undefined && finding.recommendationDiff.trim().length > 0) {
-    const { code, isRawDiff, isScopeViolation } = cleanSuggestionCode(finding.recommendationDiff);
-
-    if (isScopeViolation) {
-      body += `**Suggested Refactoring (Multi-Scope / Class Level):**\n\`\`\`typescript\n${code}\n\`\`\`\n*(Note: This fix involves class properties or lifecycle hooks. Please apply these changes at the class level rather than replacing inline lines directly.)*\n`;
-    } else if (isRawDiff) {
-      body += `**Suggested Fix (Unified Diff Reference):**\n\`\`\`diff\n${code}\n\`\`\`\n*(Note: This recommendation includes unified diff notation spanning multiple disjoint sections. Please apply manually.)*\n`;
-    } else {
-      body += `**Suggested Fix:**\n\`\`\`suggestion\n${code}\n\`\`\`\n`;
-    }
+  if (!isDelimiterBalanced(cleanCode)) {
+    return {
+      code: cleanCode,
+      isSafeSuggestion: false,
+      reason: 'Contains unbalanced brackets/braces that would break code structure if applied directly',
+    };
   }
 
-  return body;
+  return { code: cleanCode, isSafeSuggestion: true };
 }
 
 /**
- * Formats top-level PR summary markdown for GitHub comment and PR_REVIEW_REPORT.md
+ * Formats individual finding for GitHub inline review comments matching Image 2
  */
-export function toGitHubMarkdown(report: PRReviewReport): string {
-  const verdictBadge =
-    report.verdict === 'APPROVE'
-      ? '🟢 **ALL LOOKS GOOD**'
-      : report.verdict === 'APPROVE_WITH_COMMENTS'
-        ? '🟡 **APPROVE WITH COMMENTS**'
-        : '🔴 **CHANGES REQUESTED**';
+export function toInlineComment(finding: PRFinding, defectId?: string): string {
+  const idStr = defectId || finding.id || `defect-${finding.lineNumber}`;
+  const severityEmojis: Record<Severity, string> = {
+    CRITICAL: '🚨',
+    HIGH: '🔴',
+    MEDIUM: '⚡',
+    LOW: '🔍',
+    INFORMATIONAL: '💡',
+  };
 
-  let md = `<!-- ai-pr-review-bot-sticky -->\n`;
-  md += `## 🤖 AI Pull Request Code Review\n\n`;
+  const emoji = severityEmojis[finding.severity] || '🔴';
+  let body = `<!-- ai-review-comment: id=${idStr}, status=active, severity=${finding.severity}, category=${finding.category} -->\n`;
+  body += `${emoji} **${finding.title}**\n\n`;
 
-  // Scorecard table
-  md += `| Health Score | Letter Grade | Review Verdict | Files Changed | Total Issues |\n`;
-  md += `| :---: | :---: | :---: | :---: | :---: |\n`;
-  md += `| **${report.healthScore}/100** | **${report.grade}** | ${verdictBadge} | ${report.stats.filesChanged} (+${report.stats.additions}/-${report.stats.deletions}) | **${report.findings.length}** |\n\n`;
+  // Finding detail collapsible section
+  body += `<details open>\n<summary>Finding detail</summary>\n\n`;
+  body += `${finding.problem}\n\n`;
+  body += `**Impact:** ${finding.whyItMatters}\n\n`;
 
-  // Tech Stack & Framework Callout
+  let suggestedFixText = 'See recommendation below.';
+  if (finding.recommendationDiff && finding.recommendationDiff.trim().length > 0) {
+    const { code, isSafeSuggestion, reason } = cleanSuggestionCode(finding.recommendationDiff);
+    if (isSafeSuggestion) {
+      suggestedFixText = 'Apply suggested fix below:';
+      body += `**Suggested fix:** ${suggestedFixText}\n</details>\n\n`;
+      body += `\`\`\`suggestion\n${code}\n\`\`\`\n`;
+      return body;
+    } else {
+      suggestedFixText = reason ? `(${reason})` : '';
+      body += `**Suggested fix:** ${suggestedFixText}\n\n\`\`\`typescript\n${code}\n\`\`\`\n</details>\n`;
+      return body;
+    }
+  } else {
+    body += `**Suggested fix:** Manual review required.\n</details>\n`;
+    return body;
+  }
+}
+
+/**
+ * Formats an updated inline comment body when a defect has been resolved (Option A)
+ */
+export function formatResolvedComment(
+  existingBody: string,
+  resolution: ResolvedCommentResolution,
+  shortCommitSha: string,
+): string {
+  // Update or insert status tag
+  let cleanExisting = existingBody;
+  cleanExisting = cleanExisting.replace(
+    /<!-- ai-review-comment:\s*id=([^,]+),\s*status=[^,]+(.*?)-->/,
+    `<!-- ai-review-comment: id=$1, status=resolved, resolved_in=${shortCommitSha}$2 -->`,
+  );
+
+  let resolvedHeader = `✅ **Resolved in ${shortCommitSha}**.\n\n`;
+
+  if (resolution.fixDiffSnippet && resolution.fixDiffSnippet.trim().length > 0) {
+    let diffCode = resolution.fixDiffSnippet.trim();
+    if (diffCode.startsWith('```')) {
+      diffCode = diffCode.replace(/^```[^\r\n]*\r?\n/, '').replace(/\r?\n```[^\r\n]*$/, '');
+    }
+    resolvedHeader += `<details open>\n<summary>Changes that fixed it</summary>\n\n\`\`\`diff\n${diffCode}\n\`\`\`\n</details>\n\n---\n\n`;
+  } else if (resolution.explanation) {
+    resolvedHeader += `> *${resolution.explanation}*\n\n---\n\n`;
+  }
+
+  // Prepend resolved header to existing comment content
+  return `${resolvedHeader}${cleanExisting}`;
+}
+
+/**
+ * Formats the single top-level PR Quality Gate comment matching Image 1
+ */
+export function toQualityGateMarkdown(report: PRReviewReport): string {
+  const isBlocked = report.indicators.blockerCount > 0;
+  const header = isBlocked
+    ? `### ❌ AI quality gate: not ready to merge`
+    : `### ✅ AI quality gate: good to merge`;
+
+  const summary = isBlocked
+    ? `${report.indicators.blockerCount} blocker(s) identified. Merge must be blocked.`
+    : `All checks passed. Ready to merge.`;
+
+  // Quality Gate indicators bar
+  const reviewsBadge = report.indicators.reviews === 'pass' ? '✅ Reviews' : '🔴 Reviews';
+  const testsBadge = report.indicators.tests === 'pass' ? '✅ Tests' : '⚠️ Tests';
+  const obsBadge = report.indicators.observability === 'pass' ? '✅ Observability' : '⚠️ Observability';
+  const indicatorsBar = `${reviewsBadge} · ${testsBadge} · ${obsBadge}`;
+
+  let md = `${QUALITY_GATE_STICKY_MARKER}\n`;
+  md += `${header}\n\n`;
+  md += `${summary}\n\n`;
+
+  // Tech stack & environment callout
   const hasLangs = report.detectedLanguages && report.detectedLanguages.length > 0;
   const hasFws = report.detectedFrameworks && report.detectedFrameworks.length > 0;
   if (hasLangs || hasFws) {
@@ -267,93 +276,148 @@ export function toGitHubMarkdown(report: PRReviewReport): string {
     md += `> 🛠️ **Environment:** ${parts.join(' | ')}\n\n`;
   }
 
-  // Issues Breakdown
-  md += `### 📊 Defect Breakdown\n\n`;
-  md += `| 🚨 Critical | ⚠️ High | ⚡ Medium | 🔍 Low | 💡 Informational |\n`;
-  md += `| :---: | :---: | :---: | :---: | :---: |\n`;
-  md += `| **${report.stats.criticalIssues}** | **${report.stats.highIssues}** | **${report.stats.mediumIssues}** | **${report.stats.lowIssues}** | **${report.stats.informationalIssues}** |\n\n`;
+  md += `${indicatorsBar}\n\n`;
 
-  // Resolved Defects Section (Preserved across all review rounds)
+  // Active blockers & findings
+  const blockers = report.findings.filter(
+    (f) => f.severity === 'CRITICAL' || f.severity === 'HIGH' || f.severity === 'MEDIUM',
+  );
+  const worthALook = report.findings.filter((f) => f.severity === 'LOW');
+  const infoFindings = report.findings.filter((f) => f.severity === 'INFORMATIONAL');
+
+  if (blockers.length > 0) {
+    md += `#### 🔴 Must fix before merge\n`;
+    for (const f of blockers) {
+      const lineStr = f.endLineNumber && f.endLineNumber > f.lineNumber
+        ? `${f.lineNumber}-${f.endLineNumber}`
+        : `${f.lineNumber}`;
+      const fileLink = buildFileLink(report.repository, report.prNumber, report.commitSha, f.filePath, f.lineNumber);
+      md += `• **${f.title}** · [${f.filePath}:${lineStr}](${fileLink}) ↗\n`;
+    }
+    md += `\n`;
+  }
+
+  if (worthALook.length > 0) {
+    md += `#### 👀 Worth a look\n`;
+    for (const f of worthALook) {
+      const lineStr = f.endLineNumber && f.endLineNumber > f.lineNumber
+        ? `${f.lineNumber}-${f.endLineNumber}`
+        : `${f.lineNumber}`;
+      const fileLink = buildFileLink(report.repository, report.prNumber, report.commitSha, f.filePath, f.lineNumber);
+      md += `• ${f.title} · [${f.filePath}:${lineStr}](${fileLink}) ↗\n`;
+    }
+    md += `\n`;
+  }
+
+  if (infoFindings.length > 0 && blockers.length === 0 && worthALook.length === 0) {
+    md += `#### 💡 Informational\n`;
+    for (const f of infoFindings) {
+      const lineStr = f.endLineNumber && f.endLineNumber > f.lineNumber
+        ? `${f.lineNumber}-${f.endLineNumber}`
+        : `${f.lineNumber}`;
+      const fileLink = buildFileLink(report.repository, report.prNumber, report.commitSha, f.filePath, f.lineNumber);
+      md += `• ${f.title} · [${f.filePath}:${lineStr}](${fileLink}) ↗\n`;
+    }
+    md += `\n`;
+  }
+
+  // Collapsible Resolved findings section
   if (report.resolvedFindings && report.resolvedFindings.length > 0) {
-    md += `### ✅ Resolved Defects (${report.resolvedFindings.length})\n\n`;
-    md += `| # | Severity | Category | File : Line | Issue Title | Resolution Status |\n`;
-    md += `| :-: | :-: | :-: | :--- | :--- | :--- |\n`;
-
-    report.resolvedFindings.forEach((rf, idx) => {
-      const lineRange =
-        rf.endLineNumber && rf.endLineNumber > rf.lineNumber!
-          ? `${rf.filePath}:${rf.lineNumber}-${rf.endLineNumber}`
-          : rf.lineNumber
-            ? `${rf.filePath}:${rf.lineNumber}`
-            : rf.filePath;
-      const statusText = rf.explanation
-        ? `✅ **Resolved:** ${rf.explanation}`
-        : `✅ **Resolved**`;
-      md += `| ${idx + 1} | \`${rf.severity}\` | ${rf.category} | \`${lineRange}\` | ~~${rf.title}~~ | ${statusText} |\n`;
-    });
-    md += `\n`;
+    md += `<details>\n<summary>✅ ${report.resolvedFindings.length} resolved</summary>\n\n`;
+    for (const rf of report.resolvedFindings) {
+      const lineStr = rf.endLineNumber && rf.endLineNumber > (rf.lineNumber || 0)
+        ? `${rf.lineNumber}-${rf.endLineNumber}`
+        : `${rf.lineNumber || 1}`;
+      const resolvedCommit = rf.resolvedInCommit || report.shortCommitSha;
+      const explanationText = rf.explanation ? ` — *${rf.explanation}*` : '';
+      md += `• ~~${rf.title}~~ · \`${rf.filePath}:${lineStr}\` *(Resolved in ${resolvedCommit})*${explanationText}\n`;
+    }
+    md += `\n</details>\n\n`;
   }
 
-  // Executive Summary
-  md += `### 📝 Executive Summary\n\n`;
-  md += `${report.summary}\n\n`;
-
-  // Findings Table & Details
-  if (report.findings.length > 0) {
-    md += `### 🔎 Review Findings\n\n`;
-    md += `| # | Severity | Category | File : Line | Issue Title | Inline Comment |\n`;
-    md += `| :-: | :-: | :-: | :--- | :--- | :-: |\n`;
-
-    report.findings.forEach((f, idx) => {
-      const inlineStatus = f.inDiffHunk ? '✅ Attached' : 'ℹ️ Top-level';
-      const lineRange =
-        f.endLineNumber && f.endLineNumber > f.lineNumber
-          ? `${f.filePath}:${f.lineNumber}-${f.endLineNumber}`
-          : `${f.filePath}:${f.lineNumber}`;
-      md += `| ${idx + 1} | \`${f.severity}\` | ${f.category} | \`${lineRange}\` | ${f.title} | ${inlineStatus} |\n`;
-    });
-    md += `\n`;
-
-    md += `### 📋 Itemized Defect Details\n\n`;
-    report.findings.forEach((f, idx) => {
-      const lineRange =
-        f.endLineNumber && f.endLineNumber > f.lineNumber
-          ? `${f.filePath}:${f.lineNumber}-${f.endLineNumber}`
-          : `${f.filePath}:${f.lineNumber}`;
-      md += `<details open>\n`;
-      md += `<summary><b>#${idx + 1} [${f.severity}] ${f.title}</b> — <code>${lineRange}</code></summary>\n\n`;
-      md += `- **Category:** \`${f.category}\`\n`;
-      md += `- **Problem:** ${f.problem}\n`;
-      md += `- **Why It Matters:** ${f.whyItMatters}\n`;
-      if (f.recommendationDiff && f.recommendationDiff.trim().length > 0) {
-        const { code, isRawDiff, isScopeViolation } = cleanSuggestionCode(f.recommendationDiff);
-        if (isScopeViolation) {
-          md += `- **Suggested Refactoring (Multi-Scope / Class Level):**\n\n\`\`\`typescript\n${code}\n\`\`\`\n`;
-        } else if (isRawDiff) {
-          md += `- **Suggested Fix (Unified Diff Reference):**\n\n\`\`\`diff\n${code}\n\`\`\`\n`;
-        } else {
-          md += `- **Suggested Fix:**\n\n\`\`\`suggestion\n${code}\n\`\`\`\n`;
-        }
-      }
-      md += `</details>\n\n`;
-    });
-  } else {
-    md += `### 🌟 Review Findings\n\n`;
-    md += `> ✅ **All looks good!** No defects, security vulnerabilities, or architectural violations identified. Clean PR diff ready for merge.\n\n`;
-  }
-
-  // Footer
-  md += `---\n`;
-  md += `*Generated by **Universal AI PR Review Bot** powered by Google Gemini • ${report.generatedAt}*\n`;
-
-  // Embed invisible machine-readable state payload for tracking resolved defects across commits
-  const statePayload = {
-    findings: report.findings,
-    resolved: report.resolvedFindings || [],
-  };
-  md += `\n<!-- ai-review-state: ${JSON.stringify(statePayload)} -->\n`;
+  // Footer matching Image 1
+  const runLink = report.runUrl
+    ? `[Workflow run](${report.runUrl})`
+    : `Workflow run`;
+  md += `---\n${runLink} · reviewed \`${report.shortCommitSha}\`\n`;
 
   return md;
 }
 
+/**
+ * Builds a direct link to a file and line on GitHub PR
+ */
+function buildFileLink(
+  repo?: string,
+  prNumber?: number,
+  commitSha?: string,
+  filePath?: string,
+  lineNumber?: number,
+): string {
+  if (!filePath) return '#';
+  if (repo && prNumber) {
+    return `https://github.com/${repo}/pull/${prNumber}/files`;
+  }
+  if (repo && commitSha) {
+    return `https://github.com/${repo}/blob/${commitSha}/${filePath}#L${lineNumber || 1}`;
+  }
+  return `#`;
+}
 
+/**
+ * Formats report for terminal / ANSI output
+ */
+export function toConsole(report: PRReviewReport): string {
+  const doubleHr = `${colors.bold}${'═'.repeat(70)}${colors.reset}`;
+  const hr = `${colors.dim}${'─'.repeat(70)}${colors.reset}`;
+
+  let out = '\n' + doubleHr + '\n';
+  out += ` ${colors.bold}${colors.cyan}🤖 AI QUALITY GATE REPORT${colors.reset}\n`;
+  out += doubleHr + '\n\n';
+
+  const verdictText =
+    report.verdict === 'APPROVE'
+      ? `${colors.bgGreen}${colors.white}${colors.bold} PASS (Ready to Merge) ${colors.reset}`
+      : `${colors.bgRed}${colors.white}${colors.bold} FAIL (Merge Blocked) ${colors.reset}`;
+
+  out += `  ${colors.bold}Verdict:${colors.reset}       ${verdictText}\n`;
+  out += `  ${colors.bold}Blockers:${colors.reset}      ${report.indicators.blockerCount}\n`;
+  out += `  ${colors.bold}Reviewed Commit:${colors.reset} ${report.shortCommitSha}\n`;
+  if (report.detectedLanguages && report.detectedLanguages.length > 0) {
+    out += `  ${colors.bold}Languages:${colors.reset}     ${report.detectedLanguages.join(', ')}\n`;
+  }
+  if (report.detectedFrameworks && report.detectedFrameworks.length > 0) {
+    out += `  ${colors.bold}Frameworks:${colors.reset}    ${colors.cyan}${report.detectedFrameworks.join(', ')}${colors.reset}\n`;
+  }
+  out += `  ${colors.bold}Files Changed:${colors.reset} ${report.stats.filesChanged} (+${report.stats.additions} / -${report.stats.deletions})\n\n`;
+
+  out += `  ${colors.bold}Summary:${colors.reset}\n`;
+  out += `  ${report.summary.replace(/\n/g, '\n  ')}\n\n`;
+
+  if (report.findings.length > 0) {
+    out += hr + '\n';
+    out += `  ${colors.bold}Active Defects (${report.findings.length}):${colors.reset}\n\n`;
+    report.findings.forEach((f, idx) => {
+      out += `  ${idx + 1}. [${f.severity}] ${colors.bold}${f.title}${colors.reset} (${f.filePath}:${f.lineNumber})\n`;
+      out += `     Problem: ${f.problem}\n`;
+      if (f.recommendationDiff) {
+        out += `     Fix: ${f.recommendationDiff.trim().split('\n')[0]}...\n`;
+      }
+      out += '\n';
+    });
+  } else {
+    out += `  ${colors.green}✔ No defects identified. Clean PR diff!${colors.reset}\n\n`;
+  }
+
+  if (report.resolvedFindings && report.resolvedFindings.length > 0) {
+    out += hr + '\n';
+    out += `  ${colors.bold}${colors.green}✅ Resolved Defects (${report.resolvedFindings.length}):${colors.reset}\n\n`;
+    report.resolvedFindings.forEach((rf, idx) => {
+      out += `  ${idx + 1}. ~~${rf.title}~~ (${rf.filePath}:${rf.lineNumber}) - Resolved in ${rf.resolvedInCommit || report.shortCommitSha}\n`;
+    });
+    out += '\n';
+  }
+
+  out += doubleHr + '\n';
+  return out;
+}
