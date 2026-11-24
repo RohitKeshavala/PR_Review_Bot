@@ -94,7 +94,8 @@ export async function fetchPullRequestHeadCommit(
 }
 
 /**
- * Fetches all review comments posted by this bot on the PR and partitions them into active and resolved
+ * Fetches all review comments posted by this bot on the PR and partitions them into active and resolved.
+ * Robust parser handles both new comments with metadata markers and existing bot comments.
  */
 export async function fetchExistingBotReviewComments(
   token: string,
@@ -119,28 +120,56 @@ export async function fetchExistingBotReviewComments(
 
     for (const c of commentsResp.data) {
       const body = c.body || '';
-      // Only process comments originating from our bot
-      if (!body.includes(INLINE_COMMENT_MARKER_PREFIX)) {
+
+      // Identify bot comments: by marker, by Finding detail section, or by Suggested fix block
+      const isBotComment =
+        body.includes(INLINE_COMMENT_MARKER_PREFIX) ||
+        body.includes('Finding detail') ||
+        body.includes('Suggested fix') ||
+        body.includes('Suggested change') ||
+        body.includes('<!-- ai-review-comment');
+
+      if (!isBotComment) {
         continue;
       }
 
-      // Parse metadata marker: <!-- ai-review-comment: id=defect-1, status=active, severity=HIGH, category=Security -->
+      // Parse metadata marker if present:
+      // <!-- ai-review-comment: id=defect-1, status=active, severity=HIGH, category=Security -->
       const markerMatch = body.match(
         /<!-- ai-review-comment:\s*id=([^,]+),\s*status=([^,]+)(?:,\s*severity=([^,]+))?(?:,\s*category=([^,]+))?(?:,\s*resolved_in=([^,]+))?(?:.*?)-->/,
       );
 
-      const status = markerMatch && markerMatch[2] ? (markerMatch[2].trim() as 'active' | 'resolved') : 'active';
-      const severity = markerMatch && markerMatch[3] ? (markerMatch[3].trim() as Severity) : 'MEDIUM';
-      const category = markerMatch && markerMatch[4] ? (markerMatch[4].trim() as FindingCategory) : 'Maintainability';
+      let status: 'active' | 'resolved' =
+        markerMatch && markerMatch[2] ? (markerMatch[2].trim() as 'active' | 'resolved') : 'active';
+      const severity: Severity =
+        markerMatch && markerMatch[3] ? (markerMatch[3].trim() as Severity) : 'MEDIUM';
+      const category: FindingCategory =
+        markerMatch && markerMatch[4] ? (markerMatch[4].trim() as FindingCategory) : 'Maintainability';
       const resolvedInCommit = markerMatch && markerMatch[5] ? markerMatch[5].trim() : undefined;
 
-      // Extract title: e.g. 🔴 **Hardcoded Guid.Empty for new announcements**
-      const titleMatch = body.match(/(?:🚨|🔴|⚡|🔍|💡)?\s*\*\*([^*]+)\*\*/);
-      const title = titleMatch ? titleMatch[1].trim() : 'Review Finding';
+      // Extract title: handles "⚡ **Title**", "⚡ Title", "**Title**", or plain lines
+      let title = 'Review Finding';
+      const titleMatch =
+        body.match(/(?:🚨|🔴|⚡|🔍|💡)\s*\*\*([^*\r\n]+)\*\*/) ||
+        body.match(/(?:🚨|🔴|⚡|🔍|💡)\s*([^\r\n<]+)/) ||
+        body.match(/\*\*([^*\r\n]+)\*\*/);
+      if (titleMatch) {
+        title = titleMatch[1].replace(/^[#* \t]+/, '').replace(/[#* \t]+$/, '').trim();
+      }
 
-      // Extract problem detail from <summary>Finding detail</summary>
-      const problemMatch = body.match(/<summary>Finding detail<\/summary>\s*([\s\S]*?)(?:\n\n\*\*Impact:|\n<\/details>)/);
-      const problem = problemMatch ? problemMatch[1].trim() : '';
+      // Extract problem detail: from <summary>Finding detail</summary> or plain Finding detail text
+      let problem = '';
+      const problemMatch =
+        body.match(/<summary>Finding detail<\/summary>\s*([\s\S]*?)(?:\n\n(?:\*\*)?Impact(?:\*\*)?:|\n<\/details>)/i) ||
+        body.match(/Finding detail\s*[\r\n]+([\s\S]*?)(?:\n\n(?:\*\*)?Impact(?:\*\*)?:|\n\n(?:\*\*)?Suggested fix(?:\*\*)?:|\n<\/details>)/i);
+      if (problemMatch) {
+        problem = problemMatch[1].trim();
+      }
+
+      // Detect if comment is marked resolved (either in marker or in body header)
+      if (body.includes('✅ **Resolved in') || body.includes('✅ Resolved in')) {
+        status = 'resolved';
+      }
 
       const botComment: BotReviewComment = {
         id: c.id,
@@ -156,8 +185,8 @@ export async function fetchExistingBotReviewComments(
         resolvedInCommit,
       };
 
-      if (status === 'resolved' || body.includes('✅ **Resolved in')) {
-        resolvedComments.push({ ...botComment, status: 'resolved' });
+      if (status === 'resolved') {
+        resolvedComments.push(botComment);
       } else {
         activeComments.push(botComment);
       }
