@@ -134,28 +134,59 @@ export async function fetchExistingBotReviewComments(
         continue;
       }
 
-      // Parse metadata marker if present:
+      // Parse metadata marker order-independently:
       // <!-- ai-review-comment: id=defect-1, status=active, severity=HIGH, category=Security -->
-      const markerMatch = body.match(
-        /<!-- ai-review-comment:\s*id=([^,]+),\s*status=([^,]+)(?:,\s*severity=([^,]+))?(?:,\s*category=([^,]+))?(?:,\s*resolved_in=([^,]+))?(?:.*?)-->/,
-      );
+      const markerBlockMatch = body.match(/<!--\s*ai-review-comment:\s*([\s\S]*?)-->/);
+      const markerAttrs = markerBlockMatch ? markerBlockMatch[1] : '';
+      const getMarkerAttr = (key: string): string | undefined => {
+        const attrMatch = markerAttrs.match(new RegExp(`(?:^|,)\\s*${key}=([^,]+)`, 'i'));
+        return attrMatch ? attrMatch[1].trim() : undefined;
+      };
 
-      let status: 'active' | 'resolved' =
-        markerMatch && markerMatch[2] ? (markerMatch[2].trim() as 'active' | 'resolved') : 'active';
-      const severity: Severity =
-        markerMatch && markerMatch[3] ? (markerMatch[3].trim() as Severity) : 'MEDIUM';
+      const rawStatus = getMarkerAttr('status')?.toLowerCase();
+      let status: 'active' | 'resolved' = rawStatus === 'resolved' ? 'resolved' : 'active';
+
+      const validSeverities = new Set<Severity>(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFORMATIONAL']);
+      const rawSeverity = getMarkerAttr('severity')?.toUpperCase() as Severity | undefined;
+      let severity: Severity;
+      if (rawSeverity && validSeverities.has(rawSeverity)) {
+        severity = rawSeverity;
+      } else {
+        // Fallback inference from severity badge or emoji if marker attribute is missing
+        const badgeMatch = body.match(/\[(Critical|High|Medium|Low|Informational)\]/i);
+        if (badgeMatch) {
+          severity = badgeMatch[1].toUpperCase() as Severity;
+        } else if (body.includes('🚨')) {
+          severity = 'CRITICAL';
+        } else if (body.includes('🔴')) {
+          severity = 'HIGH';
+        } else if (body.includes('⚡')) {
+          severity = 'MEDIUM';
+        } else if (body.includes('🔍')) {
+          severity = 'LOW';
+        } else if (body.includes('💡')) {
+          severity = 'INFORMATIONAL';
+        } else {
+          severity = 'MEDIUM';
+        }
+      }
+
       const category: FindingCategory =
-        markerMatch && markerMatch[4] ? (markerMatch[4].trim() as FindingCategory) : 'Maintainability';
-      const resolvedInCommit = markerMatch && markerMatch[5] ? markerMatch[5].trim() : undefined;
+        (getMarkerAttr('category') as FindingCategory | undefined) || 'Maintainability';
+      const resolvedInCommit = getMarkerAttr('resolved_in');
 
-      // Extract title: handles "⚡ **Title**", "⚡ Title", "**Title**", or plain lines
+      // Extract title: handles "⚡ **[Medium] Title**", "⚡ **Title**", "⚡ Title", etc.
       let title = 'Review Finding';
       const titleMatch =
-        body.match(/(?:🚨|🔴|⚡|🔍|💡)\s*\*\*([^*\r\n]+)\*\*/) ||
+        body.match(/(?:🚨|🔴|⚡|🔍|💡)\s*(?:\*\*\[[^\]]+\]\*\*\s*)?\*\*([^*\r\n]+)\*\*/) ||
         body.match(/(?:🚨|🔴|⚡|🔍|💡)\s*([^\r\n<]+)/) ||
         body.match(/\*\*([^*\r\n]+)\*\*/);
       if (titleMatch) {
-        title = titleMatch[1].replace(/^[#* \t]+/, '').replace(/[#* \t]+$/, '').trim();
+        title = titleMatch[1]
+          .replace(/^[#* \t]+/, '')
+          .replace(/[#* \t]+$/, '')
+          .replace(/^\[(?:Critical|High|Medium|Low|Informational)\]\s*/i, '')
+          .trim();
       }
 
       // Extract problem detail: from <summary>Finding detail</summary> or plain Finding detail text

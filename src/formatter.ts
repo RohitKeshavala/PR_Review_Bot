@@ -186,7 +186,7 @@ export function toInlineComment(finding: PRFinding, defectId?: string): string {
 
   const emoji = severityEmojis[finding.severity] || '🔴';
   let body = `<!-- ai-review-comment: id=${idStr}, status=active, severity=${finding.severity}, category=${finding.category} -->\n`;
-  body += `${emoji} **${finding.title}**\n\n`;
+  body += `${emoji} **[${finding.severity}] ${finding.title}**\n\n`;
 
   // Finding detail collapsible section
   body += `<details open>\n<summary>Finding detail</summary>\n\n`;
@@ -220,11 +220,14 @@ export function formatResolvedComment(
   resolution: ResolvedCommentResolution,
   shortCommitSha: string,
 ): string {
-  // Update or insert status tag
+  // Update or insert status tag, preserving severity/category order and placing resolved_in cleanly
   let cleanExisting = existingBody;
   cleanExisting = cleanExisting.replace(
     /<!-- ai-review-comment:\s*id=([^,]+),\s*status=[^,]+(.*?)-->/,
-    `<!-- ai-review-comment: id=$1, status=resolved, resolved_in=${shortCommitSha}$2 -->`,
+    (_match, idPart: string, rest: string) => {
+      const cleanedRest = rest.replace(/,\s*resolved_in=[^,\s]+/g, '').trimEnd();
+      return `<!-- ai-review-comment: id=${idPart.trim()}, status=resolved${cleanedRest}, resolved_in=${shortCommitSha} -->`;
+    },
   );
 
   let resolvedHeader = `✅ **Resolved in ${shortCommitSha}**.\n\n`;
@@ -300,7 +303,7 @@ export function toQualityGateMarkdown(report: PRReviewReport): string {
         ? `${f.lineNumber}-${f.endLineNumber}`
         : `${f.lineNumber}`;
       const fileLink = buildFileLink(report.repository, report.prNumber, report.commitSha, f.filePath, f.lineNumber);
-      md += `• **${f.title}** · [${f.filePath}:${lineStr}](${fileLink}) ↗\n`;
+      md += `• **[${f.severity}] ${f.title}** · [${f.filePath}:${lineStr}](${fileLink}) ↗\n`;
     }
     md += `\n`;
   }
@@ -312,7 +315,7 @@ export function toQualityGateMarkdown(report: PRReviewReport): string {
         ? `${f.lineNumber}-${f.endLineNumber}`
         : `${f.lineNumber}`;
       const fileLink = buildFileLink(report.repository, report.prNumber, report.commitSha, f.filePath, f.lineNumber);
-      md += `• ${f.title} · [${f.filePath}:${lineStr}](${fileLink}) ↗\n`;
+      md += `• [${f.severity}] ${f.title} · [${f.filePath}:${lineStr}](${fileLink}) ↗\n`;
     }
     md += `\n`;
   }
@@ -324,7 +327,7 @@ export function toQualityGateMarkdown(report: PRReviewReport): string {
         ? `${f.lineNumber}-${f.endLineNumber}`
         : `${f.lineNumber}`;
       const fileLink = buildFileLink(report.repository, report.prNumber, report.commitSha, f.filePath, f.lineNumber);
-      md += `• ${f.title} · [${f.filePath}:${lineStr}](${fileLink}) ↗\n`;
+      md += `• [${f.severity}] ${f.title} · [${f.filePath}:${lineStr}](${fileLink}) ↗\n`;
     }
     md += `\n`;
   }
@@ -338,7 +341,7 @@ export function toQualityGateMarkdown(report: PRReviewReport): string {
         : `${rf.lineNumber || 1}`;
       const resolvedCommit = rf.resolvedInCommit || report.shortCommitSha;
       const explanationText = rf.explanation ? ` — *${rf.explanation}*` : '';
-      md += `• ~~${rf.title}~~ · \`${rf.filePath}:${lineStr}\` *(Resolved in ${resolvedCommit})*${explanationText}\n`;
+      md += `• [${rf.severity}] ~~${rf.title}~~ · \`${rf.filePath}:${lineStr}\` *(Resolved in ${resolvedCommit})*${explanationText}\n`;
     }
     md += `\n</details>\n\n`;
   }
