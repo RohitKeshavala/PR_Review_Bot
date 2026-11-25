@@ -21,6 +21,40 @@ import { getDiff, parseDiff } from './git-service.js';
 import { performAIReview } from './reviewer.js';
 import type { BotReviewComment, FileDiff } from './types.js';
 
+/**
+ * Resolves fallback commit SHA when neither explicit --commit/COMMIT_SHA
+ * nor GitHub API PR head lookup provided one.
+ */
+function resolveFallbackCommitSha(targetProjectPath: string): string {
+  if (process.env.GITHUB_EVENT_PATH) {
+    try {
+      const eventPayload = JSON.parse(
+        fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf-8'),
+      ) as {
+        pull_request?: { head?: { sha?: string } };
+      };
+      if (eventPayload.pull_request?.head?.sha) {
+        return eventPayload.pull_request.head.sha;
+      }
+    } catch {
+      // Ignore malformed or unreadable GitHub event payload
+    }
+  }
+
+  if (process.env.GITHUB_SHA) {
+    return process.env.GITHUB_SHA;
+  }
+
+  try {
+    return execSync('git rev-parse HEAD', {
+      cwd: targetProjectPath,
+      encoding: 'utf-8',
+    }).trim();
+  } catch {
+    return 'latest';
+  }
+}
+
 const program = new Command();
 
 program
@@ -95,16 +129,9 @@ program
         rawDiff = getDiff(config.baseBranch, config.headBranch, config.targetProjectPath);
       }
 
-      // Fallback local commit SHA if not yet set
+      // Fallback commit SHA resolution (GITHUB_EVENT_PATH -> GITHUB_SHA -> git rev-parse HEAD)
       if (!config.commitSha) {
-        try {
-          config.commitSha = execSync('git rev-parse HEAD', {
-            cwd: config.targetProjectPath,
-            encoding: 'utf-8',
-          }).trim();
-        } catch {
-          config.commitSha = 'latest';
-        }
+        config.commitSha = resolveFallbackCommitSha(config.targetProjectPath);
       }
 
       const shortCommitSha = config.commitSha ? config.commitSha.slice(0, 7) : 'latest';

@@ -42,7 +42,7 @@ export function loadConfig(cliOptions: CliOptions = {}): AppConfig {
       : undefined;
 
   const repo = cliOptions.repo || env.GITHUB_REPOSITORY;
-  const commitSha = cliOptions.commit || env.COMMIT_SHA || env.GITHUB_SHA;
+  const commitSha = cliOptions.commit || env.COMMIT_SHA;
 
   let runUrl = cliOptions.runUrl;
   if (!runUrl && env.GITHUB_SERVER_URL && repo && env.GITHUB_RUN_ID) {
