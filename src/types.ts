@@ -93,9 +93,6 @@ export interface ResolvedCommentResolution {
 }
 
 export interface QualityGateIndicators {
-  reviews: 'pass' | 'fail';
-  tests: 'pass' | 'warn';
-  observability: 'pass' | 'warn';
   blockerCount: number;
 }
 

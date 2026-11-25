@@ -580,7 +580,7 @@ function generateDryRunReview(context: ReviewContext): RawAIReviewResponse {
 }
 
 /**
- * Evaluates Quality Gate verdict and 3-pillar indicators from active findings
+ * Evaluates Quality Gate verdict and blocker count from active findings
  */
 export function evaluateQualityGate(activeFindings: PRFinding[]): {
   verdict: ReviewVerdict;
@@ -592,8 +592,6 @@ export function evaluateQualityGate(activeFindings: PRFinding[]): {
   let mediumIssues = 0;
   let lowIssues = 0;
   let informationalIssues = 0;
-  let hasTestingIssue = false;
-  let hasObservabilityIssue = false;
 
   for (const f of activeFindings) {
     if (!f.inDiffHunk) {
@@ -618,18 +616,6 @@ export function evaluateQualityGate(activeFindings: PRFinding[]): {
         informationalIssues++;
         break;
     }
-
-    if (f.category === 'Testing' || f.title.toLowerCase().includes('test') || f.problem.toLowerCase().includes('missing test')) {
-      hasTestingIssue = true;
-    }
-    if (
-      f.title.toLowerCase().includes('logging') ||
-      f.title.toLowerCase().includes('telemetry') ||
-      f.title.toLowerCase().includes('observability') ||
-      f.problem.toLowerCase().includes('observability')
-    ) {
-      hasObservabilityIssue = true;
-    }
   }
 
   const blockerCount = criticalIssues + highIssues + mediumIssues;
@@ -644,9 +630,6 @@ export function evaluateQualityGate(activeFindings: PRFinding[]): {
   }
 
   const indicators: QualityGateIndicators = {
-    reviews: blockerCount > 0 ? 'fail' : 'pass',
-    tests: hasTestingIssue ? 'warn' : 'pass',
-    observability: hasObservabilityIssue ? 'warn' : 'pass',
     blockerCount,
   };
 

@@ -70,8 +70,6 @@ On the PR conversation tab, the bot maintains a single sticky Quality Gate statu
 
 > 🛠️ **Environment:** **Languages:** TypeScript | **Frameworks / Stacks:** `Angular`, `Node.js`
 
-🔴 Reviews · ✅ Tests · ✅ Observability
-
 #### 🔴 Must fix before merge
 • **Infinite loop in GetAll** · [Services/AnnouncementService.cs:19](https://github.com/...) ↗
 • **Missing Authorization on Administrative Operations** · [Controllers/AnnouncementsController.cs:50](https://github.com/...#L50) ↗
@@ -95,8 +93,6 @@ On the PR conversation tab, the bot maintains a single sticky Quality Gate statu
 All checks passed. Ready to merge.
 
 > 🛠️ **Environment:** **Languages:** TypeScript | **Frameworks / Stacks:** `Angular`, `Node.js`
-
-✅ Reviews · ✅ Tests · ✅ Observability
 
 <details>
 <summary>✅ 2 resolved</summary>

@@ -25,6 +25,22 @@ const colors = {
 export const QUALITY_GATE_STICKY_MARKER = '<!-- ai-quality-gate-sticky -->';
 export const INLINE_COMMENT_MARKER_PREFIX = '<!-- ai-review-comment:';
 
+export const SEVERITY_EMOJIS: Record<Severity, string> = {
+  CRITICAL: '🚨',
+  HIGH: '🔴',
+  MEDIUM: '🟠',
+  LOW: '🟡',
+  INFORMATIONAL: '💡',
+};
+
+/**
+ * Formats a severity level with its consistent color-coded emoji and pill badge.
+ */
+export function formatSeverityBadge(severity: Severity): string {
+  const emoji = SEVERITY_EMOJIS[severity] || '🟠';
+  return `${emoji} \`${severity}\``;
+}
+
 export interface CleanedSuggestion {
   code: string;
   isSafeSuggestion: boolean;
@@ -176,17 +192,8 @@ export function cleanSuggestionCode(raw: string): CleanedSuggestion {
  */
 export function toInlineComment(finding: PRFinding, defectId?: string): string {
   const idStr = defectId || finding.id || `defect-${finding.lineNumber}`;
-  const severityEmojis: Record<Severity, string> = {
-    CRITICAL: '🚨',
-    HIGH: '🔴',
-    MEDIUM: '⚡',
-    LOW: '🔍',
-    INFORMATIONAL: '💡',
-  };
-
-  const emoji = severityEmojis[finding.severity] || '🔴';
   let body = `<!-- ai-review-comment: id=${idStr}, status=active, severity=${finding.severity}, category=${finding.category} -->\n`;
-  body += `${emoji} **[${finding.severity}] ${finding.title}**\n\n`;
+  body += `${formatSeverityBadge(finding.severity)} **${finding.title}**\n\n`;
 
   // Finding detail collapsible section
   body += `<details open>\n<summary>Finding detail</summary>\n\n`;
@@ -266,12 +273,6 @@ export function toQualityGateMarkdown(report: PRReviewReport): string {
     ? `${report.indicators.blockerCount} blocker(s) identified. Merge must be blocked.`
     : `All checks passed. Ready to merge.`;
 
-  // Quality Gate indicators bar
-  const reviewsBadge = report.indicators.reviews === 'pass' ? '✅ Reviews' : '🔴 Reviews';
-  const testsBadge = report.indicators.tests === 'pass' ? '✅ Tests' : '⚠️ Tests';
-  const obsBadge = report.indicators.observability === 'pass' ? '✅ Observability' : '⚠️ Observability';
-  const indicatorsBar = `${reviewsBadge} · ${testsBadge} · ${obsBadge}`;
-
   let md = `${QUALITY_GATE_STICKY_MARKER}\n`;
   md += `${header}\n\n`;
   md += `**Verdict:** ${verdictBadge}\n\n`;
@@ -287,8 +288,6 @@ export function toQualityGateMarkdown(report: PRReviewReport): string {
     md += `> 🛠️ **Environment:** ${parts.join(' | ')}\n\n`;
   }
 
-  md += `${indicatorsBar}\n\n`;
-
   // Active blockers & findings
   const blockers = report.findings.filter(
     (f) => f.severity === 'CRITICAL' || f.severity === 'HIGH' || f.severity === 'MEDIUM',
@@ -303,7 +302,7 @@ export function toQualityGateMarkdown(report: PRReviewReport): string {
         ? `${f.lineNumber}-${f.endLineNumber}`
         : `${f.lineNumber}`;
       const fileLink = buildFileLink(report.repository, report.prNumber, report.commitSha, f.filePath, f.lineNumber);
-      md += `• **[${f.severity}] ${f.title}** · [${f.filePath}:${lineStr}](${fileLink}) ↗\n`;
+      md += `• ${formatSeverityBadge(f.severity)} **${f.title}** · [${f.filePath}:${lineStr}](${fileLink}) ↗\n`;
     }
     md += `\n`;
   }
@@ -315,7 +314,7 @@ export function toQualityGateMarkdown(report: PRReviewReport): string {
         ? `${f.lineNumber}-${f.endLineNumber}`
         : `${f.lineNumber}`;
       const fileLink = buildFileLink(report.repository, report.prNumber, report.commitSha, f.filePath, f.lineNumber);
-      md += `• [${f.severity}] ${f.title} · [${f.filePath}:${lineStr}](${fileLink}) ↗\n`;
+      md += `• ${formatSeverityBadge(f.severity)} ${f.title} · [${f.filePath}:${lineStr}](${fileLink}) ↗\n`;
     }
     md += `\n`;
   }
@@ -327,7 +326,7 @@ export function toQualityGateMarkdown(report: PRReviewReport): string {
         ? `${f.lineNumber}-${f.endLineNumber}`
         : `${f.lineNumber}`;
       const fileLink = buildFileLink(report.repository, report.prNumber, report.commitSha, f.filePath, f.lineNumber);
-      md += `• [${f.severity}] ${f.title} · [${f.filePath}:${lineStr}](${fileLink}) ↗\n`;
+      md += `• ${formatSeverityBadge(f.severity)} ${f.title} · [${f.filePath}:${lineStr}](${fileLink}) ↗\n`;
     }
     md += `\n`;
   }
@@ -341,7 +340,7 @@ export function toQualityGateMarkdown(report: PRReviewReport): string {
         : `${rf.lineNumber || 1}`;
       const resolvedCommit = rf.resolvedInCommit || report.shortCommitSha;
       const explanationText = rf.explanation ? ` — *${rf.explanation}*` : '';
-      md += `• [${rf.severity}] ~~${rf.title}~~ · \`${rf.filePath}:${lineStr}\` *(Resolved in ${resolvedCommit})*${explanationText}\n`;
+      md += `• ${formatSeverityBadge(rf.severity)} ~~${rf.title}~~ · \`${rf.filePath}:${lineStr}\` *(Resolved in ${resolvedCommit})*${explanationText}\n`;
     }
     md += `\n</details>\n\n`;
   }

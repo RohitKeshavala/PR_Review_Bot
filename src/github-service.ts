@@ -152,17 +152,17 @@ export async function fetchExistingBotReviewComments(
       if (rawSeverity && validSeverities.has(rawSeverity)) {
         severity = rawSeverity;
       } else {
-        // Fallback inference from severity badge or emoji if marker attribute is missing
-        const badgeMatch = body.match(/\[(Critical|High|Medium|Low|Informational)\]/i);
+        // Fallback inference from severity badge/pill or emoji if marker attribute is missing
+        const badgeMatch = body.match(/(?:\[|`)(CRITICAL|HIGH|MEDIUM|LOW|INFORMATIONAL)(?:\]|`)/i);
         if (badgeMatch) {
           severity = badgeMatch[1].toUpperCase() as Severity;
         } else if (body.includes('🚨')) {
           severity = 'CRITICAL';
         } else if (body.includes('🔴')) {
           severity = 'HIGH';
-        } else if (body.includes('⚡')) {
+        } else if (body.includes('🟠') || body.includes('⚡')) {
           severity = 'MEDIUM';
-        } else if (body.includes('🔍')) {
+        } else if (body.includes('🟡') || body.includes('🔍')) {
           severity = 'LOW';
         } else if (body.includes('💡')) {
           severity = 'INFORMATIONAL';
@@ -175,17 +175,17 @@ export async function fetchExistingBotReviewComments(
         (getMarkerAttr('category') as FindingCategory | undefined) || 'Maintainability';
       const resolvedInCommit = getMarkerAttr('resolved_in');
 
-      // Extract title: handles "⚡ **[Medium] Title**", "⚡ **Title**", "⚡ Title", etc.
+      // Extract title: handles "🟠 `MEDIUM` **Title**", "⚡ **[MEDIUM] Title**", "⚡ **Title**", etc.
       let title = 'Review Finding';
       const titleMatch =
-        body.match(/(?:🚨|🔴|⚡|🔍|💡)\s*(?:\*\*\[[^\]]+\]\*\*\s*)?\*\*([^*\r\n]+)\*\*/) ||
-        body.match(/(?:🚨|🔴|⚡|🔍|💡)\s*([^\r\n<]+)/) ||
+        body.match(/(?:🚨|🔴|🟠|🟡|⚡|🔍|💡)\s*(?:`[^`]+`\s*)?(?:\*\*\[[^\]]+\]\*\*\s*)?\*\*([^*\r\n]+)\*\*/) ||
+        body.match(/(?:🚨|🔴|🟠|🟡|⚡|🔍|💡)\s*([^\r\n<]+)/) ||
         body.match(/\*\*([^*\r\n]+)\*\*/);
       if (titleMatch) {
         title = titleMatch[1]
           .replace(/^[#* \t]+/, '')
           .replace(/[#* \t]+$/, '')
-          .replace(/^\[(?:Critical|High|Medium|Low|Informational)\]\s*/i, '')
+          .replace(/^(?:\[|`)(?:CRITICAL|HIGH|MEDIUM|LOW|INFORMATIONAL)(?:\]|`)\s*/i, '')
           .trim();
       }
 
