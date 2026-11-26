@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { retry } from '@octokit/plugin-retry';
 import { Octokit } from '@octokit/rest';
 import {
   formatResolvedComment,
@@ -17,14 +18,22 @@ import type {
   Severity,
 } from './types.js';
 
+const RetryOctokit = Octokit.plugin(retry);
+
 /**
- * Creates an authenticated Octokit client
+ * Creates an authenticated Octokit client with automatic rate-limit and network retry handling
  */
 export function getOctokitClient(token: string): Octokit {
-  return new Octokit({
+  return new RetryOctokit({
     auth: token,
     userAgent: 'universal-pr-review-bot/2.0.0',
-  });
+    retry: {
+      enabled: true,
+      retries: 3,
+      retryAfterBaseValue: 1000,
+      doNotRetry: [400, 401, 404, 422],
+    },
+  }) as unknown as Octokit;
 }
 
 /**
@@ -224,7 +233,8 @@ export async function fetchExistingBotReviewComments(
       }
     }
   } catch (err) {
-    console.warn(`⚠️ Warning: Could not list review comments: ${err}`);
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to list existing review comments from GitHub after retries: ${msg}`);
   }
 
   return { activeComments, resolvedComments };
