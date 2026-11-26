@@ -192,7 +192,7 @@ export function cleanSuggestionCode(raw: string): CleanedSuggestion {
  */
 export function toInlineComment(finding: PRFinding, defectId?: string): string {
   const idStr = defectId || finding.id || `defect-${finding.lineNumber}`;
-  let body = `<!-- ai-review-comment: id=${idStr}, status=active, severity=${finding.severity}, category=${finding.category} -->\n`;
+  let body = `${INLINE_COMMENT_MARKER_PREFIX} id=${idStr}, status=active, severity=${finding.severity}, category=${finding.category} -->\n`;
   body += `${formatSeverityBadge(finding.severity)} **${finding.title}**\n\n`;
 
   // Finding detail collapsible section

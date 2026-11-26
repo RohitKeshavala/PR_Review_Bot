@@ -381,11 +381,13 @@ export async function syncQualityGateStickyComment(
       per_page: 100,
     });
 
-    const existingComment = commentsResp.data.find(
-      (c) =>
-        c.body &&
-        (c.body.includes(QUALITY_GATE_STICKY_MARKER) || c.body.includes('AI quality gate')),
-    );
+    const existingComment =
+      commentsResp.data.find((c) => c.body?.includes(QUALITY_GATE_STICKY_MARKER)) ||
+      commentsResp.data.find(
+        (c) =>
+          Boolean(c.body?.includes('AI quality gate:')) &&
+          (Boolean(c.user?.login?.endsWith('[bot]')) || c.user?.login === 'github-actions[bot]'),
+      );
 
     if (existingComment) {
       console.log(`Updating existing Quality Gate PR comment (ID: ${existingComment.id}) in-place...`);
