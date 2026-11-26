@@ -43,11 +43,12 @@ interface RawAIReviewResponse {
 
 /**
  * Checks if a finding corresponds to an already active review comment on GitHub.
- * Resilient to slight line shifts (within 10-30 lines) and title rephrasing.
+ * Resilient to slight line shifts (within 10-30 lines) and title rephrasing,
+ * while ensuring distinct defects on the same line are never falsely suppressed.
  */
 export function isFindingMatchingActiveComment(
-  finding: { filePath: string; lineNumber: number; endLineNumber?: number; title: string },
-  activeComment: { path: string; line: number; start_line?: number; title: string },
+  finding: { filePath: string; lineNumber: number; endLineNumber?: number; title: string; problem?: string },
+  activeComment: { path: string; line: number; start_line?: number; title: string; problem?: string },
 ): boolean {
   const pathA = normalizePath(finding.filePath).toLowerCase();
   const pathB = normalizePath(activeComment.path).toLowerCase();
@@ -65,21 +66,40 @@ export function isFindingMatchingActiveComment(
   const endB = activeComment.line;
 
   const linesOverlap = startA <= endB && startB <= endA;
-  const linesClose = Math.abs(startA - startB) <= 10;
+  const lineDistance = Math.abs(startA - startB);
 
+  // Normalized title string comparison
   const cleanTitleA = (finding.title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const cleanTitleB = (activeComment.title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  const titlesMatch =
+  const minLen = Math.min(cleanTitleA.length, cleanTitleB.length);
+  const titlesExactOrSubstring =
     Boolean(cleanTitleA && cleanTitleB) &&
-    (cleanTitleA === cleanTitleB || cleanTitleA.includes(cleanTitleB) || cleanTitleB.includes(cleanTitleA));
+    (cleanTitleA === cleanTitleB ||
+      (minLen >= 8 && (cleanTitleA.includes(cleanTitleB) || cleanTitleB.includes(cleanTitleA))));
 
-  if (linesOverlap) {
+  // Significant keyword overlap (words >= 4 characters) to handle title rephrasings
+  const extractKeywords = (str: string) =>
+    (str || '').toLowerCase().match(/[a-z0-9]{4,}/g) || [];
+  const wordsA = extractKeywords(finding.title);
+  const wordsB = new Set(extractKeywords(activeComment.title));
+  const commonKeywords = wordsA.filter((w) => wordsB.has(w));
+  const hasStrongKeywordOverlap =
+    commonKeywords.length >= 2 || (wordsA.length > 0 && commonKeywords.length / wordsA.length >= 0.5);
+
+  const isSameDefectTopic = titlesExactOrSubstring || hasStrongKeywordOverlap;
+
+  // Never match on line overlap alone: only treat as duplicate if topic/title also matches
+  if (linesOverlap && isSameDefectTopic) {
     return true;
   }
-  if (linesClose && titlesMatch) {
+
+  // Handle line shifts (up to 30 lines) when code above is added/deleted, if title matches
+  if (titlesExactOrSubstring && lineDistance <= 30) {
     return true;
   }
-  if (titlesMatch && Math.abs(startA - startB) <= 30) {
+
+  // Handle slight line shifts (within 10 lines) with keyword overlap
+  if (hasStrongKeywordOverlap && lineDistance <= 10) {
     return true;
   }
 
