@@ -477,13 +477,15 @@ export async function submitPullRequestReviewVerdict(
   const octokit = getOctokitClient(token);
 
   let currentLogin = 'github-actions[bot]';
-  try {
-    const userResp = await octokit.rest.users.getAuthenticated();
-    if (userResp.data?.login) {
-      currentLogin = userResp.data.login;
+  if (!process.env.GITHUB_ACTIONS) {
+    try {
+      const userResp = await octokit.rest.users.getAuthenticated();
+      if (userResp.data?.login) {
+        currentLogin = userResp.data.login;
+      }
+    } catch {
+      // Default to github-actions[bot]
     }
-  } catch {
-    // Default to github-actions[bot]
   }
 
   const targetStateMap: Record<string, string> = {
