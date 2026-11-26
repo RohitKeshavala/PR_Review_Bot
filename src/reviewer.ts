@@ -367,6 +367,7 @@ async function executeGeminiWithFallback(
   const candidateModels = [
     config.geminiModel,
     config.geminiFallbackModel,
+    'gemini-4-hydrogen',
     'gemini-flash-lite-latest',
     'gemini-flash-latest',
     'gemini-3.5-flash-lite',
