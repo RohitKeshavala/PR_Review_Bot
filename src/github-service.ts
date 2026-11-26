@@ -417,6 +417,10 @@ export async function syncQualityGateStickyComment(
         body: markdownBody,
       });
       console.log(`✔ Successfully created initial Quality Gate PR comment.`);
+
+      // Ensure GitHub's whole-second timestamp resolution registers the Quality Gate comment
+      // strictly earlier than any subsequent inline review comments on the PR timeline.
+      await new Promise((resolve) => setTimeout(resolve, 2000));
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
