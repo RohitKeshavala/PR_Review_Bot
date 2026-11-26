@@ -112,14 +112,14 @@ export async function fetchExistingBotReviewComments(
   const resolvedComments: BotReviewComment[] = [];
 
   try {
-    const commentsResp = await octokit.rest.pulls.listReviewComments({
+    const reviewComments = await octokit.paginate(octokit.rest.pulls.listReviewComments, {
       owner,
       repo,
       pull_number: pullNumber,
       per_page: 100,
     });
 
-    for (const c of commentsResp.data) {
+    for (const c of reviewComments) {
       const body = c.body || '';
 
       // Identify bot comments: by marker, by Finding detail section, or by Suggested fix block
@@ -374,7 +374,7 @@ export async function syncQualityGateStickyComment(
   const octokit = getOctokitClient(token);
 
   try {
-    const commentsResp = await octokit.rest.issues.listComments({
+    const issueComments = await octokit.paginate(octokit.rest.issues.listComments, {
       owner,
       repo,
       issue_number: pullNumber,
@@ -382,8 +382,8 @@ export async function syncQualityGateStickyComment(
     });
 
     const existingComment =
-      commentsResp.data.find((c) => c.body?.includes(QUALITY_GATE_STICKY_MARKER)) ||
-      commentsResp.data.find(
+      issueComments.find((c) => c.body?.includes(QUALITY_GATE_STICKY_MARKER)) ||
+      issueComments.find(
         (c) =>
           Boolean(c.body?.includes('AI quality gate:')) &&
           (Boolean(c.user?.login?.endsWith('[bot]')) || c.user?.login === 'github-actions[bot]'),
@@ -485,14 +485,14 @@ export async function submitPullRequestReviewVerdict(
 
   let existingBotReviews: Array<{ id: number; state: string; commit_id?: string | null }> = [];
   try {
-    const reviewsResp = await octokit.rest.pulls.listReviews({
+    const allReviews = await octokit.paginate(octokit.rest.pulls.listReviews, {
       owner,
       repo,
       pull_number: pullNumber,
       per_page: 100,
     });
 
-    existingBotReviews = reviewsResp.data.filter(
+    existingBotReviews = allReviews.filter(
       (r) =>
         r.user?.login === currentLogin ||
         r.user?.login === 'github-actions[bot]' ||
